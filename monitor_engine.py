@@ -264,24 +264,49 @@ def _check_one(monitor, now):
     return None
 
 
+_TYPE_LABEL = {"website": "Website", "crm": "CRM", "tcp": "TCP", "dns": "DNS", "push": "Push"}
+
+
+def _alert_context(monitor):
+    """Real per-monitor detail for the premium alert email (email_alerts.
+    format_down/format_recovered) -- the fail threshold from actual config
+    and recent checks from the actual checks table, nothing invented.
+    None when there's no single monitor to draw from (a server-level or
+    correlated-outage incident), so those callers fall back to the plainer
+    card in email_alerts instead of rendering with blank/fake stats.
+    """
+    if monitor is None:
+        return None
+    retries = monitor["retries"] if monitor["retries"] is not None else 2
+    fail_threshold = 1 if monitor["type"] == "push" else retries + 1
+    recent = list(reversed(db.list_checks(monitor["id"], limit=4)))
+    return {
+        "fail_threshold": fail_threshold,
+        "response_ms": monitor["last_response_ms"],
+        "check_type": _TYPE_LABEL.get(monitor["type"], monitor["type"].title()),
+        "interval_sec": monitor["interval_sec"],
+        "checks": [(c["ts"], bool(c["ok"]), c["detail"]) for c in recent],
+    }
+
+
 def _incident_context(incident_id):
-    """(target url, opened-at ts, notify-enabled) for an incident, for the
-    alert body and the per-monitor notify toggle.
+    """(target url, opened-at ts, notify-enabled, alert context) for an
+    incident, for the alert body and the per-monitor notify toggle.
 
     Looked up here rather than threaded through the event tuple: alerts are
-    rare, so two extra reads cost nothing, and every existing producer of
-    that tuple stays untouched. Returns (None, None, True) when the incident
-    or monitor can't be resolved (e.g. a resolve with no open incident row),
-    which just yields a shorter email and defaults to notifying.
+    rare, so a few extra reads cost nothing, and every existing producer of
+    that tuple stays untouched. Returns (None, None, True, None) when the
+    incident or monitor can't be resolved (e.g. a resolve with no open
+    incident row), which just yields a shorter email and defaults to notifying.
     """
     if incident_id is None:
-        return None, None, True
+        return None, None, True, None
     inc = db.get_incident(incident_id)
     if inc is None:
-        return None, None, True
+        return None, None, True, None
     monitor = db.get_monitor(inc["monitor_id"]) if inc["monitor_id"] is not None else None
     notify = bool(monitor["notify"]) if monitor is not None else True
-    return (monitor["url"] if monitor else None), inc["started"], notify
+    return (monitor["url"] if monitor else None), inc["started"], notify, _alert_context(monitor)
 
 
 def handle_tick_events(events):
@@ -323,16 +348,17 @@ def handle_tick_events(events):
 
     for event in events:
         kind, name, detail, incident_id = event
-        url, opened_at, notify_enabled = _incident_context(incident_id)
+        url, opened_at, notify_enabled, context = _incident_context(incident_id)
         if not notify_enabled:
             continue
         if kind == "opened":
             # The incident's own `started` beats time.time() here: it's when
             # the check actually failed, not when this tick got around to
             # mailing about it.
-            subject, body, html_body = email_alerts.format_down(name, detail, url=url, ts=opened_at)
+            subject, body, html_body = email_alerts.format_down(name, detail, url=url, ts=opened_at, context=context)
         else:
-            subject, body, html_body = email_alerts.format_recovered(name, detail, url=url, ts=time.time())
+            subject, body, html_body = email_alerts.format_recovered(name, detail, url=url, ts=time.time(),
+                                                                       context=context)
         email_alerts.send(subject, body, html_body)
         if incident_id is not None:
             db.record_incident_event(incident_id, time.time(), "email_sent", subject)
