@@ -497,7 +497,13 @@ def build_detail_content(target_id):
 
     push_url_block = []
     if detail["push_token"]:
-        push_url = f"{flask.request.host_url.rstrip('/')}/push/{detail['push_token']}"
+        # DASHBOARD_URL (already used by email_alerts.py) wins over the
+        # incoming Host header when set -- request.host_url alone is
+        # spoofable behind a reverse proxy without a pinned SERVER_NAME
+        # (security review L2), which would show/copy a push URL pointing
+        # at an attacker-controlled domain.
+        base = os.environ.get("DASHBOARD_URL") or flask.request.host_url
+        push_url = f"{base.rstrip('/')}/push/{detail['push_token']}"
         push_url_block = [
             html.Div("Push URL — ping this from your cron job/script", className="detail-section-label"),
             html.Div(push_url, className="push-url"),
@@ -860,11 +866,38 @@ def serve_layout():
     )
 
 
+SESSION_KEY_PATH = ".session_secret.key"
+
+
+def _load_or_create_secret_key():
+    # Never a hardcoded default -- PRD §16 "never in plain code". If
+    # SESSION_SECRET_KEY isn't set, persist a generated one to a local file
+    # instead of regenerating on every restart (security review L1) --
+    # otherwise every restart silently logs out every user. The file is
+    # gitignored (*.key) like any other local secret.
+    #
+    # Only called from the __main__ block below, not at module import --
+    # every test file in this repo imports app.py just to exercise its
+    # callback functions, and none of them should write a real secret
+    # file into the project directory as a side effect of that import
+    # (same reasoning as db.py's DB_PATH being swappable per test).
+    env_key = os.environ.get("SESSION_SECRET_KEY")
+    if env_key:
+        return env_key
+    if os.path.exists(SESSION_KEY_PATH):
+        with open(SESSION_KEY_PATH) as f:
+            return f.read().strip()
+    key = secrets.token_hex(32)
+    with open(SESSION_KEY_PATH, "w") as f:
+        f.write(key)
+    return key
+
+
 app = Dash(__name__, title="Rovix Monitoring Dashboard", suppress_callback_exceptions=True)
 app.layout = serve_layout
-# Random per-restart if unset rather than a hardcoded default -- PRD §16 "never
-# in plain code". Means sessions don't survive a restart unless SESSION_SECRET_KEY
-# is set, which is fine for an internal tool (same tradeoff as SMTP_* in email_alerts.py).
+# Ephemeral here (matches pre-L1-fix behavior) -- merely importing this
+# module (every UI test file does) must not touch disk. The real running
+# server overrides this with the persisted key in the __main__ block below.
 app.server.secret_key = os.environ.get("SESSION_SECRET_KEY") or secrets.token_hex(32)
 auth.register_auth(app.server)  # PRD §16 gap 6 — session-login gate for the whole dashboard
 api.register_api(app.server)  # PRD §11 — same process/port as the dashboard
@@ -1284,5 +1317,6 @@ def open_edit_settings(_open, _close, _cancel, _backdrop, _submit, email_1, emai
 
 if __name__ == "__main__":
     debug = "--debug" in sys.argv
+    app.server.secret_key = _load_or_create_secret_key()  # persist across real restarts (L1)
     monitor_engine.start_background_scheduler(debug=debug)
     app.run(debug=debug, port=8050)
