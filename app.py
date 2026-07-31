@@ -1020,18 +1020,23 @@ def retry_incidents(_n):
     Input("add-monitor-type", "value"),
 )
 def toggle_type_fields(selected_types):
-    # Push monitors need only a name + expected check-in interval -- no
-    # target to reach out to, no port, no expected-value match, no retries/
-    # timeout (it has its own fixed 1-miss/1-recovery semantics), no HTTP options.
+    # A push-only selection needs just a name + expected check-in interval
+    # -- no target to reach out to, no port, no expected-value match, no
+    # retries/timeout (push has its own fixed 1-miss/1-recovery semantics),
+    # no HTTP options. Combined with an active type (e.g. Website + Push,
+    # grouped on one card), both sets of fields apply at once: the active
+    # type still needs its target/keyword/etc, and push still needs its
+    # interval -- neither hides the other.
     selected_types = selected_types or []
     is_push = "push" in selected_types
+    has_active_type = bool(set(selected_types) - {"push"})
     is_http = bool({"website", "crm"} & set(selected_types))
-    target_cls = "form-field hidden" if is_push else "form-field"
+    target_cls = "form-field" if has_active_type else "form-field hidden"
     port_cls = "form-field" if "tcp" in selected_types else "form-field hidden"
-    keyword_cls = "form-field hidden" if is_push else "form-field"
+    keyword_cls = "form-field" if has_active_type else "form-field hidden"
     interval_cls = "form-field" if is_push else "form-field hidden"
-    retries_cls = "form-field hidden" if is_push else "form-field"
-    timeout_cls = "form-field hidden" if is_push else "form-field"
+    retries_cls = "form-field" if has_active_type else "form-field hidden"
+    timeout_cls = "form-field" if has_active_type else "form-field hidden"
     method_cls = "form-field" if is_http else "form-field hidden"
     body_cls = "form-field" if is_http else "form-field hidden"
     return (target_cls, port_cls, keyword_cls, interval_cls,
@@ -1171,8 +1176,6 @@ def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
 
         if not name or not types:
             return error("Name and at least one check type are required.")
-        if editing_id is None and "push" in types and len(types) > 1:
-            return error("Push/Passive can't be combined with other check types.")
         for mtype in types:
             if mtype != "push" and not url:
                 return error("Target is required for this check type.")
