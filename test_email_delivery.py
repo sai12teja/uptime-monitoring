@@ -124,7 +124,7 @@ assert "[DOWN] mailer-check" in down_msg, down_msg
 assert "HTTP 500" in down_msg, down_msg
 # enriched content: the failing target, when it was detected, where to look
 assert "https://mailer.invalid" in down_msg, down_msg
-assert "Detected:" in down_msg, down_msg
+assert "Time     :" in down_msg, down_msg
 assert "Dashboard: https://rovix.example/dash" in down_msg, down_msg
 # the timestamp must be the incident's own `started`, not send time
 started = db.get_incident(incident_id)["started"]
@@ -140,18 +140,18 @@ assert smtp.wait_for(3), "recovery did not send an email"
 up_msg = smtp.messages[2]
 assert "[RECOVERED] mailer-check" in up_msg, up_msg
 assert "https://mailer.invalid" in up_msg, up_msg
-assert "Recovered:" in up_msg, up_msg
+assert "Reason   : Downtime 2m" in up_msg, up_msg
 
 # --- DASHBOARD_URL unset => link omitted entirely, no broken localhost URL ---
 del os.environ["DASHBOARD_URL"]
-_, no_link_body = email_alerts.format_down("x", "y", url="https://z.invalid", ts=time.time())
+_, no_link_body, _ = email_alerts.format_down("x", "y", url="https://z.invalid", ts=time.time())
 assert "Dashboard:" not in no_link_body, no_link_body
 assert "https://z.invalid" in no_link_body, no_link_body
 
 # --- a caller with no url/ts still produces a valid, shorter mail ---
-_, bare = email_alerts.format_down("x", "boom")
-assert "Problem: boom" in bare, bare
-assert "Target" not in bare and "Detected" not in bare, bare
+_, bare, _ = email_alerts.format_down("x", "boom")
+assert "Reason   : boom" in bare, bare
+assert "Target" not in bare and "Time" not in bare, bare
 
 # --- an unreachable SMTP host must log-and-skip, never crash the scheduler ---
 os.environ["SMTP_PORT"] = "9"  # discard port, nothing listening

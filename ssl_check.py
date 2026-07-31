@@ -90,9 +90,9 @@ def check_ssl_for_monitor(monitor, now):
                                             new_status, problem_type="ssl")
         else:
             db.update_incident_severity(incident_id, new_status)
-        subject, body = email_alerts.format_alert(monitor["name"], detail, new_status,
-                                                    url=monitor["url"], ts=now)
-        email_alerts.send(subject, body)
+        subject, body, html_body = email_alerts.format_alert(monitor["name"], detail, new_status,
+                                                               url=monitor["url"], ts=now)
+        email_alerts.send(subject, body, html_body)
         # Fresh time.time(), not `now` (this function's batch-tick timestamp,
         # captured before db.open_incident's own internal time.time() call) --
         # reusing `now` could predate the incident's `started`, sorting this
@@ -102,9 +102,10 @@ def check_ssl_for_monitor(monitor, now):
         db.update_incident_severity(incident_id, new_status)
     elif transition == "resolve":
         downtime_sec = db.resolve_incident(monitor["id"], problem_type="ssl")
-        subject, body = email_alerts.format_recovered(f"{monitor['name']} (SSL)", db.format_duration(downtime_sec),
-                                                       url=monitor["url"], ts=now)
-        email_alerts.send(subject, body)
+        subject, body, html_body = email_alerts.format_recovered(f"{monitor['name']} (SSL)",
+                                                                   db.format_duration(downtime_sec),
+                                                                   url=monitor["url"], ts=now)
+        email_alerts.send(subject, body, html_body)
         db.record_incident_event(incident_id, time.time(), "email_sent", subject)
         incident_id = None
 

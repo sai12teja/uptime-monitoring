@@ -57,7 +57,7 @@ def seed(name, status):
 
 def fire(events):
     sent.clear()
-    with patch.object(email_alerts, "send", side_effect=lambda s, b: sent.append(s)):
+    with patch.object(email_alerts, "send", side_effect=lambda s, b, h=None: sent.append(s)):
         handle_tick_events(events)
 
 

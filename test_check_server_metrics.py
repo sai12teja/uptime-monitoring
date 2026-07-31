@@ -33,7 +33,7 @@ def tick(cpu, ts):
     # for its own "already evaluated this reading" staleness gate.
     sh._cache["ts"] = ts
     with patch.object(sh, "read_all", return_value=fake_metrics), \
-         patch.object(email_alerts, "send", side_effect=lambda s, b: sent.append(s)):
+         patch.object(email_alerts, "send", side_effect=lambda s, b, h=None: sent.append(s)):
         sh.check_server_metrics()
 
 

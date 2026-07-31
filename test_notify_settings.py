@@ -91,7 +91,7 @@ muted_incident = db.open_incident(muted_id, "muted site", "HTTP 500")
 loud_incident = db.open_incident(loud_id, "loud site", "HTTP 500")
 
 sent = []
-with patch.object(email_alerts, "send", side_effect=lambda s, b: sent.append(s)):
+with patch.object(email_alerts, "send", side_effect=lambda s, b, h=None: sent.append(s)):
     handle_tick_events([
         ("opened", "muted site", "HTTP 500", muted_incident),
         ("opened", "loud site", "HTTP 500", loud_incident),

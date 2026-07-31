@@ -301,19 +301,19 @@ def handle_tick_events(events):
     if is_correlated_now and not was_correlated:
         incident_id = db.open_server_incident(
             "Server", f"Correlated outage — {down_count} of {total} monitored sites down", "critical")
-        subject, body = email_alerts.format_server_alert(
+        subject, body, html_body = email_alerts.format_server_alert(
             f"Correlated outage — {down_count} of {total} monitored sites down", "critical",
             ts=time.time())
-        email_alerts.send(subject, body)
+        email_alerts.send(subject, body, html_body)
         db.record_incident_event(incident_id, time.time(), "email_sent", subject)
         db.set_metric_state("correlated_outage", "active", None, 0, incident_id, time.time())
         return  # this tick's individual events are the same root cause — suppressed
 
     if was_correlated and not is_correlated_now:
         downtime_sec = db.resolve_server_incident(state["incident_id"])
-        subject, body = email_alerts.format_recovered(
+        subject, body, html_body = email_alerts.format_recovered(
             "Server (correlated outage)", db.format_duration(downtime_sec), ts=time.time())
-        email_alerts.send(subject, body)
+        email_alerts.send(subject, body, html_body)
         db.record_incident_event(state["incident_id"], time.time(), "email_sent", subject)
         db.set_metric_state("correlated_outage", "inactive", None, 0, None, time.time())
         return  # the individual recovery that triggered this is part of the same event
@@ -330,10 +330,10 @@ def handle_tick_events(events):
             # The incident's own `started` beats time.time() here: it's when
             # the check actually failed, not when this tick got around to
             # mailing about it.
-            subject, body = email_alerts.format_down(name, detail, url=url, ts=opened_at)
+            subject, body, html_body = email_alerts.format_down(name, detail, url=url, ts=opened_at)
         else:
-            subject, body = email_alerts.format_recovered(name, detail, url=url, ts=time.time())
-        email_alerts.send(subject, body)
+            subject, body, html_body = email_alerts.format_recovered(name, detail, url=url, ts=time.time())
+        email_alerts.send(subject, body, html_body)
         if incident_id is not None:
             db.record_incident_event(incident_id, time.time(), "email_sent", subject)
 

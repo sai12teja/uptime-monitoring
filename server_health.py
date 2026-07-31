@@ -232,16 +232,17 @@ def check_server_metrics():
                 incident_id = db.open_server_incident("Server", detail, new_status)
             else:
                 db.update_incident_severity(incident_id, new_status)
-            subject, body = email_alerts.format_server_alert(detail, new_status, ts=read_ts)
-            email_alerts.send(subject, body)
+            subject, body, html_body = email_alerts.format_server_alert(detail, new_status, ts=read_ts)
+            email_alerts.send(subject, body, html_body)
             db.record_incident_event(incident_id, time.time(), "email_sent", subject)
         elif transition == "deescalate":
             db.update_incident_severity(incident_id, new_status)
         elif transition == "resolve":
             downtime_sec = db.resolve_server_incident(incident_id)
-            subject, body = email_alerts.format_recovered(f"Server ({label})", db.format_duration(downtime_sec),
-                                                           ts=read_ts)
-            email_alerts.send(subject, body)
+            subject, body, html_body = email_alerts.format_recovered(f"Server ({label})",
+                                                                       db.format_duration(downtime_sec),
+                                                                       ts=read_ts)
+            email_alerts.send(subject, body, html_body)
             db.record_incident_event(incident_id, time.time(), "email_sent", subject)
             incident_id = None
 

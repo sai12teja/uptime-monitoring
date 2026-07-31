@@ -59,7 +59,7 @@ sent = []
 def tick(days_remaining, error, ts):
     sent.clear()
     with patch("ssl_check.get_cert_days_remaining", return_value=(days_remaining, error)), \
-         patch.object(email_alerts, "send", side_effect=lambda s, b: sent.append(s)):
+         patch.object(email_alerts, "send", side_effect=lambda s, b, h=None: sent.append(s)):
         ssl_check.check_ssl_for_monitor(db.get_monitor(mid), ts)
 
 

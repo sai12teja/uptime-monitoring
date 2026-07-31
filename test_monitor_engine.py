@@ -101,7 +101,7 @@ with patch("monitor_engine.do_http_check", return_value=(False, 50, "HTTP 500"))
     event = None
     for _ in range(3):  # 3rd consecutive failure crosses the DOWN threshold
         event = _check_one(db.get_monitor(mid), time.time())
-with patch.object(email_alerts, "send", side_effect=lambda s, b: sent.append(s)):
+with patch.object(email_alerts, "send", side_effect=lambda s, b, h=None: sent.append(s)):
     handle_tick_events([event] if event else [])
 
 assert sent == ["[DOWN] wiring-test.invalid — HTTP 500"], sent
@@ -111,7 +111,7 @@ with patch("monitor_engine.do_http_check", return_value=(True, 40, "HTTP 200")):
     event = None
     for _ in range(2):  # 2nd consecutive success crosses back to UP
         event = _check_one(db.get_monitor(mid), time.time())
-with patch.object(email_alerts, "send", side_effect=lambda s, b: sent.append(s)):
+with patch.object(email_alerts, "send", side_effect=lambda s, b, h=None: sent.append(s)):
     handle_tick_events([event] if event else [])
 
 assert len(sent) == 1 and sent[0].startswith("[RECOVERED] wiring-test.invalid — "), sent
@@ -147,7 +147,7 @@ assert still_down_event is None  # no opened/resolved transition -> no email-wor
 kinds = [e["event_type"] for e in db.list_incident_events(incident_id)]
 assert kinds == ["check_failure", "check_failure"], kinds
 
-with patch.object(email_alerts, "send", side_effect=lambda s, b: sent2.append(s)):
+with patch.object(email_alerts, "send", side_effect=lambda s, b, h=None: sent2.append(s)):
     handle_tick_events([opened_event])
 email_events = [e for e in db.list_incident_events(incident_id) if e["event_type"] == "email_sent"]
 assert len(email_events) == 1 and email_events[0]["detail"] == sent2[0]
@@ -160,7 +160,7 @@ with patch("monitor_engine.do_http_check", return_value=(True, 40, "HTTP 200")):
     for _ in range(2):
         resolved_event = _check_one(db.get_monitor(mid2), time.time())
 assert resolved_event[3] == incident_id
-with patch.object(email_alerts, "send", side_effect=lambda s, b: sent2.append(s)):
+with patch.object(email_alerts, "send", side_effect=lambda s, b, h=None: sent2.append(s)):
     handle_tick_events([resolved_event])
 email_events = [e for e in db.list_incident_events(incident_id) if e["event_type"] == "email_sent"]
 assert len(email_events) == 2
