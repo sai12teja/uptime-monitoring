@@ -5,6 +5,7 @@ machine (§10: 3 consecutive fails -> DOWN, 2 consecutive successes -> UP)
 Server health (CPU/RAM/disk) and correlated-outage detection are separate
 tasks — this module only owns website/CRM reachability.
 """
+import ipaddress
 import os
 import socket
 import threading
@@ -51,9 +52,48 @@ def _encode_http_body(body, encoding):
     return body.encode(), "application/json"  # default: json
 
 
+def _is_blocked_host(hostname):
+    """SSRF/internal-recon guard (security review H2): a monitor is a
+    standing invitation to fetch/connect to whatever hostname a user
+    types, on a schedule, forever. Blocks link-local/RFC1918-private/
+    reserved targets by default -- cloud metadata endpoints
+    (169.254.169.254) and other hosts on the local network that the
+    monitoring server can reach but a monitor author normally shouldn't
+    be able to probe.
+
+    Loopback (127.0.0.0/8, ::1) is deliberately exempt: monitoring a
+    service on the same box the scheduler runs on is a legitimate,
+    already-tested use case (this repo's own test suite spins up real
+    local HTTP/TCP servers on 127.0.0.1), and it isn't the network-pivot
+    risk the rest of this guard exists for -- code that can create a
+    monitor already runs in this same process.
+
+    Checked here at connect time, not at monitor creation -- resolving
+    fresh on every tick is what actually stops DNS rebinding (a hostname
+    that resolved to a public IP at creation time but a private one now).
+    Unresolvable hostnames return False so the real check reports the
+    DNS failure instead of a misleading "blocked" detail.
+    """
+    try:
+        addrs = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
+    except socket.gaierror:
+        return False
+    for addr in addrs:
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if ip.is_private and not ip.is_loopback:
+            return True
+    return False
+
+
 def do_http_check(monitor):
     """Returns (ok: bool, response_ms: int, detail: str)."""
     start = time.monotonic()
+    hostname = urllib.parse.urlparse(monitor["url"]).hostname
+    if hostname and _is_blocked_host(hostname):
+        return False, 0, "Blocked: target resolves to a private/internal address"
     timeout = monitor["timeout_sec"] or CHECK_TIMEOUT_SEC
     headers = {"User-Agent": "RovixMonitor/1.0"}
     method = monitor["http_method"] or "GET"
@@ -95,6 +135,8 @@ def do_http_check(monitor):
 def do_tcp_check(monitor):
     """Returns (ok, response_ms, detail) -- same contract as do_http_check."""
     start = time.monotonic()
+    if _is_blocked_host(monitor["url"]):
+        return False, 0, "Blocked: target resolves to a private/internal address"
     timeout = monitor["timeout_sec"] or CHECK_TIMEOUT_SEC
     try:
         with socket.create_connection((monitor["url"], monitor["port"]), timeout=timeout):

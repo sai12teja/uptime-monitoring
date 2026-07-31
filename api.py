@@ -7,6 +7,7 @@ login, since callers are scripts/curl, not a logged-in browser. A Blueprint
 scopes the before_request check to just these routes, leaving the Dash UI's
 own session-based gate (auth.py) untouched.
 """
+import hmac
 import os
 
 from flask import Blueprint, jsonify, request
@@ -22,7 +23,10 @@ def _require_api_key():
     configured = os.environ.get("API_KEY")
     if not configured:
         return jsonify({"error": "API key not configured"}), 503
-    if request.headers.get("X-API-Key") != configured:
+    # hmac.compare_digest, not != -- a plain string compare short-circuits
+    # on the first differing byte, leaking key-prefix-match timing to a
+    # network attacker (security review H1). This is the API's only auth gate.
+    if not hmac.compare_digest(request.headers.get("X-API-Key", ""), configured):
         return jsonify({"error": "unauthorized"}), 401
 
 
