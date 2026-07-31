@@ -25,6 +25,37 @@ def _fire(component_id):
     context_value.set(AttributeDict({"triggered_inputs": [{"prop_id": f"{component_id}.n_clicks", "value": 1}]}))
 
 
+def _all_ids(component):
+    # Dash components: .id (may be absent) + .children (component, list of
+    # components, or a plain string/None) -- walk both.
+    found = set()
+    comp_id = getattr(component, "id", None)
+    if isinstance(comp_id, str):
+        found.add(comp_id)
+    children = getattr(component, "children", None)
+    if isinstance(children, (list, tuple)):
+        for c in children:
+            if hasattr(c, "children") or hasattr(c, "id"):
+                found |= _all_ids(c)
+    elif hasattr(children, "children") or hasattr(children, "id"):
+        found |= _all_ids(children)
+    return found
+
+
+# --- detail-edit-btn/detail-delete-btn must exist in the INITIAL layout,
+# not just after build_detail_content() runs from a card click. They're
+# registered as callback Inputs; if a user's very first interaction is
+# "+ Add Monitor" before ever opening a detail panel, a browser that has
+# never seen these ids throws "nonexistent object used in an Input" and
+# that first click silently does nothing -- a real bug server-side
+# Python tests can't catch, since they invoke the callback function
+# directly rather than checking what the browser actually receives.
+initial_ids = _all_ids(app.serve_layout())
+assert "detail-edit-btn" in initial_ids, "detail-edit-btn missing from initial layout"
+assert "detail-delete-btn" in initial_ids, "detail-delete-btn missing from initial layout"
+print("All initial-layout Edit/Delete button presence checks passed.")
+
+
 def _call_add_edit(edit_open=None, submit=None, **state):
     defaults = dict(name=None, url=None, types=None, keyword=None, port=None, interval=None,
                      retries=None, timeout=None, method=None, body=None, encoding=None, notify=None,

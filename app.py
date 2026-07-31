@@ -606,7 +606,30 @@ def serve_layout():
                         children=[
                             html.Button("×", id="detail-close", className="detail-close",
                                         n_clicks=0, title="Close"),
-                            html.Div(id="detail-content"),
+                            html.Div(
+                                id="detail-content",
+                                # detail-edit-btn/detail-delete-btn must exist from initial
+                                # page load, not just after the first card click -- they're
+                                # registered as callback Inputs, and if a user's very first
+                                # interaction is "+ Add Monitor" (before ever opening a
+                                # detail panel), the browser doesn't have these ids yet and
+                                # dash-renderer throws "nonexistent object used in an Input"
+                                # -- which broke that very first click. build_detail_content()
+                                # replaces this whole subtree once a target is selected, using
+                                # the same ids, so this placeholder is only ever seen while
+                                # detail-wrapper itself is hidden.
+                                children=[
+                                    html.Div(
+                                        className="detail-actions",
+                                        children=[
+                                            html.Button("Edit", id="detail-edit-btn",
+                                                        className="ack-btn", n_clicks=0),
+                                            html.Button("Delete", id="detail-delete-btn",
+                                                        className="ack-btn delete-btn", n_clicks=0),
+                                        ],
+                                    ),
+                                ],
+                            ),
                         ],
                     ),
                 ],
