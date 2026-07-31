@@ -140,7 +140,7 @@ assert smtp.wait_for(3), "recovery did not send an email"
 up_msg = smtp.messages[2]
 assert "[RECOVERED] mailer-check" in up_msg, up_msg
 assert "https://mailer.invalid" in up_msg, up_msg
-assert "Reason   : Downtime 2m" in up_msg, up_msg
+assert "Downtime : 2m" in up_msg, up_msg
 
 # --- DASHBOARD_URL unset => link omitted entirely, no broken localhost URL ---
 del os.environ["DASHBOARD_URL"]

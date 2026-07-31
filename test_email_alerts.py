@@ -62,12 +62,30 @@ assert 'style="' in html_body
 # A URL target becomes a clickable link.
 assert 'href="https://clientsite.com/health"' in html_body
 
-# Severity drives the accent color: red for down, green for recovered, amber for warning.
-assert "#dc2626" in html_body
+# Severity drives the accent: coral for down, phosphor for recovered, amber for warning.
+assert "#ff4d5e" in html_body
 _, _, up_html = format_recovered("clientsite.com", "12m")
-assert "#16a34a" in up_html
+assert "#39ff88" in up_html
 _, _, warn_html = format_alert("clientsite.com", "SSL expiring", "warning")
-assert "#d97706" in warn_html
+assert "#ffb020" in warn_html
+
+# The scope trace is monospace text art, never inline SVG or a data: URI --
+# Gmail strips both, which would leave a broken box where the trace should be.
+assert "<svg" not in html_body.lower(), "no inline SVG; Gmail strips it"
+assert "data:image" not in html_body, "no data: URIs; Gmail blocks them"
+assert "<img" not in html_body.lower(), "no remote images to be blocked"
+# Down flatlines, recovered beats -- readable at a glance without the label.
+assert "NO SIGNAL" in html_body and "_______" in html_body
+assert "RHYTHM STABLE" in up_html and "/\\" in up_html
+assert "IRREGULAR" in warn_html
+
+# Status word in the bar tracks the state.
+assert "&#9679; DOWN" in html_body
+assert "&#9679; RECOVERED" in up_html
+assert "&#9679; DEGRADED" in warn_html
+
+# A recovered alert leads with downtime, not a "Reason".
+assert "Downtime" in up_html and "12m" in up_html
 
 # Monitor names/details are user-supplied via the Add Monitor form -- they are
 # untrusted at this boundary and must be escaped, never interpolated raw into
