@@ -1,0 +1,49 @@
+# --- Secrets / credentials -------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+*_credentials.json
+*.secrets
+
+# --- Python ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Runtime data (contains password hashes, live monitor/incident data) ---
+*.db
+*.sqlite
+*.sqlite3
+
+# --- JS/Node & vendored deps (kept for stack coverage, unused today) -------
+node_modules/
+vendor/
+
+# --- Local tool state --------------------------------------------------
+.gstack/
+.claude/settings.local.json
+
+# --- OS / editor cruft ---------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
