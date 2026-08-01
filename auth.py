@@ -11,7 +11,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 import db
 
 LOGIN_PAGE = """<!doctype html>
-<html><head><title>Rovix Monitoring — Log in</title>
+<html><head><title>Rovix Uptime Monitoring — Log in</title>
 <style>
   body {{ font-family: system-ui, sans-serif; background: #12161c; color: #e6e9ef;
          display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
@@ -26,7 +26,7 @@ LOGIN_PAGE = """<!doctype html>
 </style></head>
 <body>
   <form method="post" action="/login">
-    <h1>Rovix Monitoring</h1>
+    <h1>Rovix Uptime Monitoring</h1>
     {error_html}
     <label for="username">Username</label>
     <input id="username" name="username" autofocus>

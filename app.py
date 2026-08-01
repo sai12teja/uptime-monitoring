@@ -79,7 +79,7 @@ def build_summary_or_banner():
     bar = html.Div(
         className="summary-bar calm",
         children=[
-            html.H1("Rovix Monitoring", className="brand"),
+            html.H1("Rovix Uptime Monitoring", className="brand"),
             html.Div(
                 className="counts",
                 children=[
@@ -916,7 +916,7 @@ def _load_or_create_secret_key():
     return key
 
 
-app = Dash(__name__, title="Rovix Monitoring Dashboard", suppress_callback_exceptions=True)
+app = Dash(__name__, title="Rovix Uptime Monitoring", suppress_callback_exceptions=True)
 app.layout = serve_layout
 # Ephemeral here (matches pre-L1-fix behavior) -- merely importing this
 # module (every UI test file does) must not touch disk. The real running
