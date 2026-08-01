@@ -28,6 +28,7 @@ def _target_dict(row, now):
         "last_checked_sec": int(now - row["last_checked_at"]) if row["last_checked_at"] else None,
         "response_ms": row["last_response_ms"],
         "group_key": row["group_key"],
+        "subrow_label": row["subrow_label"],
     }
 
 
@@ -108,11 +109,12 @@ def acknowledge_incident(incident_id, who):
 
 def add_target(name, url, target_type, keyword=None, port=None, interval_sec=60,
                 retries=None, timeout_sec=None, http_method="GET",
-                http_body=None, http_body_encoding="json", group_key=None, notify=True):
+                http_body=None, http_body_encoding="json", group_key=None, notify=True,
+                subrow_label=None):
     return db.add_monitor(name, url, target_type, keyword=keyword, port=port, interval_sec=interval_sec,
                            retries=retries, timeout_sec=timeout_sec, http_method=http_method,
                            http_body=http_body, http_body_encoding=http_body_encoding, group_key=group_key,
-                           notify=notify)
+                           notify=notify, subrow_label=subrow_label)
 
 
 def update_target(target_id, name, url, keyword, interval_sec, port=None,

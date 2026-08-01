@@ -36,7 +36,8 @@ CREATE TABLE IF NOT EXISTS monitors (
     http_body TEXT,
     http_body_encoding TEXT DEFAULT 'json',
     group_key TEXT,
-    notify INTEGER NOT NULL DEFAULT 1
+    notify INTEGER NOT NULL DEFAULT 1,
+    subrow_label TEXT
 );
 CREATE TABLE IF NOT EXISTS checks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +137,7 @@ def init_db():
         _add_column_if_missing(conn, "monitors", "http_body_encoding", "TEXT DEFAULT 'json'")
         _add_column_if_missing(conn, "monitors", "group_key", "TEXT")
         _add_column_if_missing(conn, "monitors", "notify", "INTEGER NOT NULL DEFAULT 1")
+        _add_column_if_missing(conn, "monitors", "subrow_label", "TEXT")
 
 
 def list_monitors():
@@ -179,17 +181,20 @@ def deactivate_monitor(monitor_id):
 
 def add_monitor(name, url, target_type, keyword=None, interval_sec=60, port=None,
                  retries=None, timeout_sec=None, http_method="GET",
-                 http_body=None, http_body_encoding="json", group_key=None, notify=True):
+                 http_body=None, http_body_encoding="json", group_key=None, notify=True,
+                 subrow_label=None):
     # Push monitors are pinged via a secret-token URL rather than actively
     # checked -- the token is always server-generated, never client-supplied.
     push_token = secrets.token_hex(16) if target_type == "push" else None
     with _conn() as conn:
         cur = conn.execute(
             "INSERT INTO monitors (name, url, type, keyword, interval_sec, created_at, port, push_token, "
-            "retries, timeout_sec, http_method, http_body, http_body_encoding, group_key, notify) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "retries, timeout_sec, http_method, http_body, http_body_encoding, group_key, notify, "
+            "subrow_label) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, url, target_type, keyword, interval_sec, time.time(), port, push_token,
-             retries, timeout_sec, http_method, http_body, http_body_encoding, group_key, int(notify)),
+             retries, timeout_sec, http_method, http_body, http_body_encoding, group_key, int(notify),
+             subrow_label),
         )
         return cur.lastrowid
 

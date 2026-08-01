@@ -31,46 +31,57 @@ def _fire(component_id):
 def _call_add_edit(edit_open=None, submit=None, **state):
     defaults = dict(name=None, url=None, types=None, keyword=None, port=None, interval=None,
                      retries=None, timeout=None, method=None, body=None, encoding=None, notify=None,
-                     filter_text=None, selected_id=None, editing_id=None)
+                     paths_text=None, filter_text=None, selected_id=None, editing_id=None)
     defaults.update(state)
     result = app.add_edit_monitor(
         None, None, None, None, submit, edit_open,
         defaults["name"], defaults["url"], defaults["types"], defaults["keyword"],
         defaults["port"], defaults["interval"], defaults["retries"], defaults["timeout"],
         defaults["method"], defaults["body"], defaults["encoding"], defaults["notify"],
-        defaults["filter_text"], defaults["selected_id"], defaults["editing_id"],
+        defaults["paths_text"], defaults["filter_text"], defaults["selected_id"], defaults["editing_id"],
     )
     return dict(zip(app.ADD_EDIT_OUTPUT_IDS, result))
 
 
 # ---------- toggle_type_fields: combined selection shows both field sets ----------
 
-# Push alone: unchanged from before -- only interval, everything else hidden.
-target_cls, port_cls, keyword_cls, interval_cls, retries_cls, timeout_cls, method_cls, body_cls = \
-    toggle_type_fields(["push"])
+# Push alone: unchanged from before -- only interval, everything else hidden
+# (paths field is HTTP-only, hidden here same as method/body).
+target_cls, port_cls, keyword_cls, interval_cls, retries_cls, timeout_cls, method_cls, body_cls, \
+    encoding_cls, paths_cls = toggle_type_fields(["push"], None)
 assert target_cls == "form-field hidden"
 assert keyword_cls == "form-field hidden"
 assert retries_cls == "form-field hidden"
 assert timeout_cls == "form-field hidden"
 assert interval_cls == "form-field"
+assert paths_cls == "form-field hidden"
 
-# Website alone: unchanged from before -- target/keyword/retries/timeout show, interval hidden.
-target_cls, port_cls, keyword_cls, interval_cls, retries_cls, timeout_cls, method_cls, body_cls = \
-    toggle_type_fields(["website"])
+# Website alone: target/keyword/retries/timeout show; interval is now shown
+# for every type (page monitoring needs a per-site check frequency), and
+# paths shows since website is an HTTP type.
+target_cls, port_cls, keyword_cls, interval_cls, retries_cls, timeout_cls, method_cls, body_cls, \
+    encoding_cls, paths_cls = toggle_type_fields(["website"], None)
 assert target_cls == "form-field"
 assert keyword_cls == "form-field"
 assert retries_cls == "form-field"
 assert timeout_cls == "form-field"
-assert interval_cls == "form-field hidden"
+assert interval_cls == "form-field"
+assert paths_cls == "form-field"
+
+# Website while editing an existing monitor: paths hides -- editing is a
+# single row, no fan-out, so a visible-but-inert field would just confuse.
+*_, paths_cls_editing = toggle_type_fields(["website"], 42)
+assert paths_cls_editing == "form-field hidden", paths_cls_editing
 
 # Website + Push combined: BOTH field sets show -- neither hides the other.
-target_cls, port_cls, keyword_cls, interval_cls, retries_cls, timeout_cls, method_cls, body_cls = \
-    toggle_type_fields(["website", "push"])
+target_cls, port_cls, keyword_cls, interval_cls, retries_cls, timeout_cls, method_cls, body_cls, \
+    encoding_cls, paths_cls = toggle_type_fields(["website", "push"], None)
 assert target_cls == "form-field", "target must still show -- website in the mix needs it"
 assert keyword_cls == "form-field"
 assert retries_cls == "form-field"
 assert timeout_cls == "form-field"
 assert interval_cls == "form-field", "interval must still show -- push in the mix needs it"
+assert paths_cls == "form-field"
 
 print("All toggle_type_fields combined-selection checks passed.")
 

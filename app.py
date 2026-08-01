@@ -116,6 +116,10 @@ def build_summary_or_banner():
 # ---------- Target cards ----------
 
 def _strip_type_suffix(name):
+    # Path suffix (" — /about") is always the outer layer -- entry names are
+    # built as "base [(Type)] [— path]" -- so strip it before the type suffix.
+    if " — " in name:
+        name = name.rsplit(" — ", 1)[0]
     for label in TYPE_LABELS.values():
         suffix = f" ({label})"
         if name.endswith(suffix):
@@ -166,9 +170,13 @@ def build_target_card(group):
         # Same information as a solo card's meta line (status + response
         # time), just laid out per check type -- a grouped card shouldn't
         # tell you less than the cards it replaces.
+        # subrow_label disambiguates same-type entries (several pages of one
+        # site); falls back to the check-type label when there's only one
+        # entry per type (the original multi-select-check-type case).
+        label = t.get("subrow_label") or TYPE_LABELS.get(t["type"], t["type"].title())
         children = [
             html.Span(className="status-dot"),
-            html.Span(TYPE_LABELS.get(t["type"], t["type"].title()), className="target-card-subtype"),
+            html.Span(label, className="target-card-subtype"),
             html.Span(STATUS_LABEL_SHORT[t["status"]], className="status-label target-card-substatus"),
         ]
         if t["response_ms"] is not None:
@@ -663,7 +671,11 @@ def serve_layout():
                                 className="form-field",
                                 children=[
                                     html.Label("Target", htmlFor="add-monitor-url", className="form-label"),
-                                    dcc.Input(id="add-monitor-url", type="text",
+                                    # autoComplete off -- this field id is reused for every monitor ever
+                                    # added, so browsers accumulate every past URL as an autofill
+                                    # suggestion; picking the wrong one silently points a new monitor at
+                                    # someone else's site instead of the one just typed.
+                                    dcc.Input(id="add-monitor-url", type="text", autoComplete="off",
                                               placeholder="https://example.com", className="form-input",
                                               value=""),
                                 ],
@@ -688,23 +700,39 @@ def serve_layout():
                                 ],
                             ),
                             html.Div(
-                                id="add-monitor-port-wrapper",
-                                className="form-field hidden",
+                                className="form-row",
                                 children=[
-                                    html.Label("Port", htmlFor="add-monitor-port", className="form-label"),
-                                    dcc.Input(id="add-monitor-port", type="number",
-                                              placeholder="e.g. 5432", className="form-input", value=""),
+                                    html.Div(
+                                        id="add-monitor-port-wrapper",
+                                        className="form-field hidden",
+                                        children=[
+                                            html.Label("Port", htmlFor="add-monitor-port",
+                                                        className="form-label"),
+                                            dcc.Input(id="add-monitor-port", type="number",
+                                                      placeholder="e.g. 5432", className="form-input", value=""),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        id="add-monitor-interval-wrapper",
+                                        className="form-field",
+                                        children=[
+                                            html.Label("Check interval (seconds)",
+                                                        htmlFor="add-monitor-interval", className="form-label"),
+                                            dcc.Input(id="add-monitor-interval", type="number",
+                                                      placeholder="e.g. 60 (default)",
+                                                      className="form-input", value=""),
+                                        ],
+                                    ),
                                 ],
                             ),
                             html.Div(
-                                id="add-monitor-interval-wrapper",
+                                id="add-monitor-paths-wrapper",
                                 className="form-field hidden",
                                 children=[
-                                    html.Label("Expected check-in interval (seconds)",
-                                                htmlFor="add-monitor-interval", className="form-label"),
-                                    dcc.Input(id="add-monitor-interval", type="number",
-                                              placeholder="e.g. 86400 for a daily job",
-                                              className="form-input", value=""),
+                                    html.Label("Extra pages to monitor (one path per line, optional)",
+                                                htmlFor="add-monitor-paths", className="form-label"),
+                                    dcc.Textarea(id="add-monitor-paths", className="form-input",
+                                                 placeholder="/\n/about\n/contact", value=""),
                                 ],
                             ),
                             html.Div(
@@ -730,34 +758,61 @@ def serve_layout():
                                 ],
                             ),
                             html.Div(
-                                id="add-monitor-retries-wrapper",
-                                className="form-field",
+                                className="form-row",
                                 children=[
-                                    html.Label("Retries (extra fails allowed before marking down)",
-                                                htmlFor="add-monitor-retries", className="form-label"),
-                                    dcc.Input(id="add-monitor-retries", type="number",
-                                              placeholder="e.g. 2 (default)", className="form-input", value=""),
+                                    html.Div(
+                                        id="add-monitor-retries-wrapper",
+                                        className="form-field",
+                                        children=[
+                                            html.Label("Retries (extra fails before marking down)",
+                                                        htmlFor="add-monitor-retries", className="form-label"),
+                                            dcc.Input(id="add-monitor-retries", type="number",
+                                                      placeholder="e.g. 2 (default)", className="form-input",
+                                                      value=""),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        id="add-monitor-timeout-wrapper",
+                                        className="form-field",
+                                        children=[
+                                            html.Label("Request timeout (seconds)",
+                                                        htmlFor="add-monitor-timeout", className="form-label"),
+                                            dcc.Input(id="add-monitor-timeout", type="number",
+                                                      placeholder="e.g. 10 (default)", className="form-input",
+                                                      value=""),
+                                        ],
+                                    ),
                                 ],
                             ),
                             html.Div(
-                                id="add-monitor-timeout-wrapper",
-                                className="form-field",
+                                className="form-row",
                                 children=[
-                                    html.Label("Request timeout (seconds)",
-                                                htmlFor="add-monitor-timeout", className="form-label"),
-                                    dcc.Input(id="add-monitor-timeout", type="number",
-                                              placeholder="e.g. 10 (default)", className="form-input", value=""),
-                                ],
-                            ),
-                            html.Div(
-                                id="add-monitor-method-wrapper",
-                                className="form-field hidden",
-                                children=[
-                                    html.Label("HTTP Method", htmlFor="add-monitor-method",
-                                                className="form-label"),
-                                    dcc.Dropdown(id="add-monitor-method", className="form-dropdown",
-                                                 value="GET", clearable=False,
-                                                 options=["GET", "POST", "PUT", "PATCH", "DELETE"]),
+                                    html.Div(
+                                        id="add-monitor-method-wrapper",
+                                        className="form-field hidden",
+                                        children=[
+                                            html.Label("HTTP Method", htmlFor="add-monitor-method",
+                                                        className="form-label"),
+                                            dcc.Dropdown(id="add-monitor-method", className="form-dropdown",
+                                                         value="GET", clearable=False,
+                                                         options=["GET", "POST", "PUT", "PATCH", "DELETE"]),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        id="add-monitor-encoding-wrapper",
+                                        className="form-field hidden",
+                                        children=[
+                                            html.Label("Body Encoding", htmlFor="add-monitor-encoding",
+                                                        className="form-label"),
+                                            dcc.Dropdown(id="add-monitor-encoding", className="form-dropdown",
+                                                         value="json", clearable=False,
+                                                         options=[
+                                                             {"label": "JSON", "value": "json"},
+                                                             {"label": "Form (key=value per line)", "value": "form"},
+                                                             {"label": "Plain text", "value": "text"},
+                                                         ]),
+                                        ],
+                                    ),
                                 ],
                             ),
                             html.Div(
@@ -768,15 +823,6 @@ def serve_layout():
                                                 htmlFor="add-monitor-body", className="form-label"),
                                     dcc.Textarea(id="add-monitor-body", className="form-input",
                                                  placeholder='e.g. {"key": "value"}', value=""),
-                                    html.Label("Body Encoding", htmlFor="add-monitor-encoding",
-                                                className="form-label"),
-                                    dcc.Dropdown(id="add-monitor-encoding", className="form-dropdown",
-                                                 value="json", clearable=False,
-                                                 options=[
-                                                     {"label": "JSON", "value": "json"},
-                                                     {"label": "Form (key=value per line)", "value": "form"},
-                                                     {"label": "Plain text", "value": "text"},
-                                                 ]),
                                 ],
                             ),
                             html.Div(
@@ -1040,9 +1086,12 @@ def retry_incidents(_n):
     Output("add-monitor-timeout-wrapper", "className"),
     Output("add-monitor-method-wrapper", "className"),
     Output("add-monitor-body-wrapper", "className"),
+    Output("add-monitor-encoding-wrapper", "className"),
+    Output("add-monitor-paths-wrapper", "className"),
     Input("add-monitor-type", "value"),
+    State("editing-monitor-id", "data"),
 )
-def toggle_type_fields(selected_types):
+def toggle_type_fields(selected_types, editing_id):
     # A push-only selection needs just a name + expected check-in interval
     # -- no target to reach out to, no port, no expected-value match, no
     # retries/timeout (push has its own fixed 1-miss/1-recovery semantics),
@@ -1057,13 +1106,21 @@ def toggle_type_fields(selected_types):
     target_cls = "form-field" if has_active_type else "form-field hidden"
     port_cls = "form-field" if "tcp" in selected_types else "form-field hidden"
     keyword_cls = "form-field" if has_active_type else "form-field hidden"
-    interval_cls = "form-field" if is_push else "form-field hidden"
+    # Interval used to be push-only ("expected check-in interval"); it's a
+    # real per-monitor check-frequency knob for every type now (§ page
+    # monitoring — sub-pages default slower than the homepage), so it's
+    # always shown once a type is selected.
+    interval_cls = "form-field" if (has_active_type or is_push) else "form-field hidden"
     retries_cls = "form-field" if has_active_type else "form-field hidden"
     timeout_cls = "form-field" if has_active_type else "form-field hidden"
     method_cls = "form-field" if is_http else "form-field hidden"
     body_cls = "form-field" if is_http else "form-field hidden"
+    encoding_cls = "form-field" if is_http else "form-field hidden"
+    # Paths only fan out on a fresh Add submission -- editing is always a
+    # single existing row, so the field is hidden rather than shown-but-inert.
+    paths_cls = "form-field" if (is_http and editing_id is None) else "form-field hidden"
     return (target_cls, port_cls, keyword_cls, interval_cls,
-            retries_cls, timeout_cls, method_cls, body_cls)
+            retries_cls, timeout_cls, method_cls, body_cls, encoding_cls, paths_cls)
 
 
 TYPE_LABELS = {"website": "Website", "crm": "CRM", "tcp": "TCP", "dns": "DNS", "push": "Push"}
@@ -1078,6 +1135,58 @@ def _target_for_type(url, mtype):
     return url
 
 
+def _parse_paths(raw_text):
+    """Split the Paths textarea into stripped, non-blank path strings. Blank
+    input means "no fan-out" -- callers get [None] so a single iteration
+    with the plain Target URL behaves exactly like today."""
+    paths = [line.strip() for line in (raw_text or "").splitlines() if line.strip()]
+    return paths or [None]
+
+
+def _url_with_path(base_url, path):
+    if path is None:
+        return base_url
+    return base_url.rstrip("/") + "/" + path.lstrip("/")
+
+
+def _default_interval(path, explicit_interval):
+    """Homepage (no path, or root '/') keeps the 60s default; any other
+    sub-page defaults slower (300s) so a whole page fleet doesn't multiply
+    check volume 1:1 with the homepage. An explicit value always wins."""
+    if explicit_interval:
+        return explicit_interval
+    return 60 if path in (None, "/", "") else 300
+
+
+def _build_entries(name, types, paths):
+    """Cross check-types x paths into one entry per monitor row. Suffixes
+    the shared `name` and sets a `subrow_label` only when there's more than
+    one entry to disambiguate -- a plain single-type, no-path submission
+    (the common case) comes back untouched. Paths only apply to HTTP-style
+    types (website/crm); TCP/DNS/Push always get exactly one entry."""
+    type_suffix = len(types) > 1
+    path_suffix = len(paths) > 1
+    entries = []
+    for mtype in types:
+        applicable_paths = paths if mtype in ("website", "crm") else [None]
+        for path in applicable_paths:
+            entry_name = name
+            if type_suffix:
+                entry_name += f" ({TYPE_LABELS[mtype]})"
+            if path_suffix and path is not None:
+                entry_name += f" — {path}"
+
+            if path_suffix and path is not None and type_suffix:
+                subrow_label = f"{TYPE_LABELS[mtype]} {path}"
+            elif path_suffix and path is not None:
+                subrow_label = path
+            else:
+                subrow_label = None
+
+            entries.append({"type": mtype, "path": path, "name": entry_name, "subrow_label": subrow_label})
+    return entries
+
+
 # Dict-based output handling — this callback now serves both Add and Edit
 # (same modal, same fields; Edit just pre-fills them and locks the check
 # type), so each branch only needs to name the handful of keys it actually
@@ -1085,7 +1194,7 @@ def _target_for_type(url, mtype):
 ADD_EDIT_OUTPUT_IDS = [
     "wrapper_class", "error", "name", "url", "keyword", "summary", "grid",
     "title", "submit_label", "type_value", "type_wrapper_class",
-    "port", "interval", "retries", "timeout", "method", "body", "encoding", "notify",
+    "port", "interval", "retries", "timeout", "method", "body", "encoding", "notify", "paths",
     "editing_id", "detail_content", "delete_confirm_class", "settings_class",
 ]
 
@@ -1110,6 +1219,7 @@ ADD_EDIT_OUTPUT_IDS = [
     Output("add-monitor-body", "value"),
     Output("add-monitor-encoding", "value"),
     Output("add-monitor-notify", "value"),
+    Output("add-monitor-paths", "value"),
     Output("editing-monitor-id", "data"),
     Output("detail-content", "children", allow_duplicate=True),
     Output("delete-confirm-wrapper", "className", allow_duplicate=True),
@@ -1132,6 +1242,7 @@ ADD_EDIT_OUTPUT_IDS = [
     State("add-monitor-body", "value"),
     State("add-monitor-encoding", "value"),
     State("add-monitor-notify", "value"),
+    State("add-monitor-paths", "value"),
     State("target-filter", "value"),
     State("selected-target", "data"),
     State("editing-monitor-id", "data"),
@@ -1139,7 +1250,7 @@ ADD_EDIT_OUTPUT_IDS = [
 )
 def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
                       name, url, types, keyword, port, interval, retries, timeout,
-                      method, body, encoding, notify, filter_text, selected_id, editing_id):
+                      method, body, encoding, notify, paths_text, filter_text, selected_id, editing_id):
     trig = ctx.triggered_id
     out = {key: no_update for key in ADD_EDIT_OUTPUT_IDS}
 
@@ -1152,7 +1263,7 @@ def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
             title="Add Monitor", submit_label="Add Monitor",
             type_value=["website"], type_wrapper_class="form-field",
             port="", interval="", retries="", timeout="", method="GET", body="", encoding="json",
-            notify=["notify"],
+            notify=["notify"], paths="",
             editing_id=None, delete_confirm_class="modal-wrapper addmonitor-hidden",
             settings_class="modal-wrapper addmonitor-hidden",
         )
@@ -1179,6 +1290,7 @@ def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
             body=row["http_body"] or "",
             encoding=row["http_body_encoding"] or "json",
             notify=["notify"] if row["notify"] else [],
+            paths="",  # editing is always a single row -- no fan-out, field is ignored on submit
             editing_id=selected_id,
         )
         return result()
@@ -1231,21 +1343,24 @@ def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
 
         # Mock add — swap for POST /monitors later (§11). New monitor starts
         # "awaiting" (Decision 2.1) since nothing has checked it yet. Multiple
-        # selected types create one independent monitor per type (same
-        # target) rather than one monitor checked multiple ways -- each
-        # already gets its own status/incidents/timeline for free. They
-        # share a group_key so the grid renders them as one card.
-        suffix = len(types) > 1
-        group_key = secrets.token_hex(8) if suffix else None
-        for mtype in types:
-            entry_name = f"{name} ({TYPE_LABELS[mtype]})" if suffix else name
-            data.add_target(entry_name, _target_for_type(url, mtype), mtype, keyword=keyword, port=port or None,
-                             interval_sec=interval or 60,
+        # selected types, and/or multiple paths of the same site, each create
+        # one independent monitor (same target host) rather than one monitor
+        # checked several ways -- each already gets its own status/incidents/
+        # timeline for free. They share a group_key so the grid renders them
+        # as one card.
+        paths = _parse_paths(paths_text)
+        entries = _build_entries(name, types, paths)
+        group_key = secrets.token_hex(8) if len(entries) > 1 else None
+        explicit_interval = interval if interval not in (None, "") else None
+        for entry in entries:
+            target_url = _target_for_type(_url_with_path(url, entry["path"]), entry["type"])
+            data.add_target(entry["name"], target_url, entry["type"], keyword=keyword, port=port or None,
+                             interval_sec=_default_interval(entry["path"], explicit_interval),
                              retries=retries if retries not in (None, "") else None,
                              timeout_sec=timeout if timeout not in (None, "") else None,
                              http_method=method or "GET", http_body=body or None,
                              http_body_encoding=encoding or "json", group_key=group_key,
-                             notify=notify_enabled)
+                             notify=notify_enabled, subrow_label=entry["subrow_label"])
         out.update(wrapper_class="modal-wrapper addmonitor-hidden",
                    summary=build_summary_or_banner(), grid=build_target_grid(filter_text))
         return result()
