@@ -87,7 +87,10 @@ print("All gzip keyword-check assertions passed.")
 # turns into the actual send, exactly like the real scheduler tick does.
 import db
 import email_alerts
+import monitor_engine
 from monitor_engine import _check_one, handle_tick_events
+
+monitor_engine.ALERT_BATCH_WINDOW_SEC = 0  # flush every batch immediately, matching this file's per-event assertions
 
 db.DB_PATH = "test_monitor_engine.db"
 if os.path.exists(db.DB_PATH):

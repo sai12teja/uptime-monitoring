@@ -408,6 +408,153 @@ def format_recovered(monitor_name, downtime, url=None, ts=None, context=None):
     return subject, body, html_body
 
 
+def _digest_rows(items, accent):
+    out = []
+    for item in items:
+        name = _esc(item["name"])
+        detail = _esc(item["detail"])
+        time_str = _esc(_fmt_hms(item.get("ts"))) or ""
+        url = item.get("url")
+        target_html = ""
+        if url:
+            target_html = (
+                f'<div style="padding-top:4px;"><a href="{_esc(url)}" style="color:{accent};'
+                f'text-decoration:none;border-bottom:1px dashed {accent};font-size:11.5px;'
+                f'font-family:{_MONO};">{_esc(url)}</a></div>'
+            )
+        out.append(
+            '<tr>'
+            '<td style="padding:14px 0;border-top:1px solid #131f33;">'
+            f'<div style="font-family:{_SANS};font-size:14px;font-weight:700;color:#f2fff7;">{name}</div>'
+            f'<div style="font-family:{_MONO};font-size:12px;color:#b9c7c0;padding-top:4px;">{detail}</div>'
+            f'{target_html}</td>'
+            f'<td align="right" valign="top" style="padding:14px 0;border-top:1px solid #131f33;'
+            f'font-family:{_MONO};font-size:11px;color:#6d8a80;white-space:nowrap;">{time_str}</td>'
+            '</tr>'
+        )
+    return "".join(out)
+
+
+def _premium_digest(state, items, dashboard):
+    """Consolidated card for 2+ monitors that changed state in the same
+    short debounce window -- e.g. a shared host going down takes several
+    sites with it at once. Same dark phosphor aesthetic as _premium_card,
+    but a scannable list of rows instead of one monitor's hero stats and
+    recent-checks timeline, which don't generalize across different
+    monitors' independent check histories. This is what stops a shared
+    outage from flooding one email per affected site.
+    """
+    accent = _STATUS_COLOR[state]
+    recovered = state == "recovered"
+    n = len(items)
+    badge_icon = "&#10003;" if recovered else "&#9888;"
+    badge_text = "Back online" if recovered else "Outage detected"
+    headline = f"{n} sites recovered" if recovered else f"{n} sites are down"
+    cta_ink = "#04170c" if recovered else "#1a050a"
+
+    button = ""
+    if dashboard:
+        button = (
+            '<tr><td style="padding:22px 28px 28px;">'
+            '<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr>'
+            f'<td align="center" bgcolor="{accent}" style="border-radius:10px;">'
+            f'<a href="{_esc(dashboard)}" style="display:block;padding:14px 0;font-family:{_SANS};'
+            f'font-size:14px;font-weight:700;color:{cta_ink};text-decoration:none;border-radius:10px;">'
+            'Open Dashboard &rarr;</a></td></tr></table></td></tr>'
+        )
+    else:
+        button = '<tr><td style="padding:8px 28px 24px;"></td></tr>'
+
+    return (
+        f'<div style="background:#05080f;padding:32px 12px;font-family:{_SANS};">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'style="max-width:600px;margin:0 auto;width:100%;">'
+
+        '<tr><td style="padding:0 6px 12px;">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;"><tr>'
+        f'<td align="left" style="font-family:{_MONO};font-size:11px;letter-spacing:2px;'
+        f'text-transform:uppercase;color:#6d8a80;"><span style="color:{accent};">&#9679;</span>'
+        '&nbsp; ROVIX AI MONITORING</td>'
+        '</tr></table></td></tr>'
+
+        '<tr><td style="background:#0b121d;border:1px solid #1a2740;border-radius:16px;">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;">'
+
+        f'<tr><td style="background:{accent};height:4px;line-height:4px;font-size:0;'
+        'border-radius:16px 16px 0 0;">&nbsp;</td></tr>'
+
+        '<tr><td style="padding:26px 28px 4px;">'
+        f'<div style="font-family:{_MONO};font-size:11px;letter-spacing:2.5px;text-transform:uppercase;'
+        f'color:{accent};padding-bottom:10px;">{badge_icon}&nbsp; {badge_text}</div>'
+        f'<div style="font-family:{_SANS};font-size:23px;line-height:1.3;font-weight:700;color:#f2fff7;">'
+        f'{headline}</div></td></tr>'
+
+        '<tr><td style="padding:8px 28px 0;">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="width:100%;">'
+        f'{_digest_rows(items, accent)}'
+        '</table></td></tr>'
+
+        f'{button}'
+        '</table></td></tr>'
+
+        '<tr><td align="center" style="padding:16px 24px 0;font-family:' + _MONO + ';font-size:10.5px;'
+        'letter-spacing:.5px;color:#3d5567;">&mdash; Rovix AI Monitoring &middot; phosphor never lies &mdash;'
+        '</td></tr>'
+
+        '</table></div>'
+    )
+
+
+def format_down_batch(items):
+    """Returns (subject, plain_text, html) for 1+ monitors that went down
+    in the same short debounce window. `items` is a list of dicts with
+    keys name/detail/url/ts/context (context optional, same shape
+    monitor_engine._alert_context returns). A single item renders exactly
+    like format_down(..., context=...) always has -- the common case is
+    unaffected. 2+ items render as one consolidated digest instead of N
+    separate emails, which is the actual point: a shared host taking out
+    several sites at once must not flood an inbox with nearly-identical
+    [DOWN] emails.
+    """
+    if len(items) == 1:
+        it = items[0]
+        return format_down(it["name"], it["detail"], url=it.get("url"), ts=it.get("ts"),
+                            context=it.get("context"))
+
+    subject = f"[DOWN] {len(items)} sites down"
+    lines = [f"🔴 ALERT: {len(items)} sites are down", ""]
+    for it in items:
+        target = f" ({it['url']})" if it.get("url") else ""
+        lines.append(f"- {it['name']}: {it['detail']}{target}")
+    dashboard = os.environ.get("DASHBOARD_URL")
+    if dashboard:
+        lines += ["", f"Dashboard: {dashboard}"]
+    lines += ["", "— Rovix AI Monitoring"]
+    html_body = _premium_digest("down", items, dashboard)
+    return subject, "\n".join(lines), html_body
+
+
+def format_recovered_batch(items):
+    """Same idea as format_down_batch, for recovery. `detail` here is the
+    downtime string (matching format_recovered's own `downtime` param)."""
+    if len(items) == 1:
+        it = items[0]
+        return format_recovered(it["name"], it["detail"], url=it.get("url"), ts=it.get("ts"),
+                                 context=it.get("context"))
+
+    subject = f"[RECOVERED] {len(items)} sites recovered"
+    lines = [f"🟢 ALERT: {len(items)} sites recovered", ""]
+    for it in items:
+        target = f" ({it['url']})" if it.get("url") else ""
+        lines.append(f"- {it['name']}: {it['detail']} downtime{target}")
+    dashboard = os.environ.get("DASHBOARD_URL")
+    if dashboard:
+        lines += ["", f"Dashboard: {dashboard}"]
+    lines += ["", "— Rovix AI Monitoring"]
+    html_body = _premium_digest("recovered", items, dashboard)
+    return subject, "\n".join(lines), html_body
+
+
 def format_alert(target_name, detail, severity, url=None, ts=None):
     subject = f"[{severity.upper()}] {target_name} — {detail}"
     icon = _STATUS_ICON.get(severity, _STATUS_ICON["critical"])

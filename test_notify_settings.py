@@ -21,7 +21,10 @@ from dash._callback_context import context_value
 from dash._utils import AttributeDict
 
 import app
+import monitor_engine
 from monitor_engine import handle_tick_events
+
+monitor_engine.ALERT_BATCH_WINDOW_SEC = 0  # flush every batch immediately, matching this file's per-event assertions
 
 
 def _fire(component_id):

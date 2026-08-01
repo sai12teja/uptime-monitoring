@@ -17,7 +17,10 @@ if os.path.exists(db.DB_PATH):
 db.init_db()
 
 import email_alerts
+import monitor_engine
 from monitor_engine import _alert_context, _check_one, handle_tick_events
+
+monitor_engine.ALERT_BATCH_WINDOW_SEC = 0  # flush every batch immediately, matching this file's per-event assertions
 
 # ---------- monitor_engine._alert_context: real config, not invented ----------
 

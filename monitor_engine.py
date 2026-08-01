@@ -32,6 +32,16 @@ MIN_MONITORS_FOR_CORRELATION = 3  # 1-of-1 or 2-of-2 down isn't evidence of a sh
 CHECKS_RETENTION_DAYS = int(os.environ.get("CHECKS_RETENTION_DAYS", "90"))  # PRD §16
 PURGE_INTERVAL_SEC = 24 * 3600  # once a day is plenty at a 90-day-scale window
 
+# Alert digest debounce: a shared host going down takes several monitors
+# with it, but each monitor's own check only reaches its fail threshold on
+# its own staggered schedule -- so the resulting "opened" events land
+# several ticks apart, not all in one. Queuing them and flushing as ONE
+# email once this many seconds pass since the first queued item is what
+# turns that into one digest instead of one email per affected site.
+# 0 collapses to "flush immediately" (every existing single-event test
+# relies on this to keep working unchanged).
+ALERT_BATCH_WINDOW_SEC = int(os.environ.get("ALERT_BATCH_WINDOW_SEC", "60"))
+
 
 def compute_is_correlated_outage(monitor_statuses, min_monitors=MIN_MONITORS_FOR_CORRELATION):
     """PRD §9: every hosted site failing at once implies a shared local
@@ -315,6 +325,11 @@ def handle_tick_events(events):
     shared-cause outage (PRD §9/§15) — and sends exactly the alert(s) that
     situation calls for.
     """
+    # Runs first and unconditionally (even on the correlated-outage early
+    # returns below) so a pending digest batch can't get stuck waiting for
+    # a tick that never reaches the per-event loop again.
+    _flush_expired_batches(time.time())
+
     monitors = db.list_monitors()
     total = len(monitors)
     down_count = sum(1 for m in monitors if m["status"] == "down")
@@ -346,22 +361,58 @@ def handle_tick_events(events):
     if was_correlated and is_correlated_now:
         return  # ongoing, already alerted — no repeat noise
 
+    now = time.time()
     for event in events:
         kind, name, detail, incident_id = event
         url, opened_at, notify_enabled, context = _incident_context(incident_id)
         if not notify_enabled:
             continue
-        if kind == "opened":
-            # The incident's own `started` beats time.time() here: it's when
-            # the check actually failed, not when this tick got around to
-            # mailing about it.
-            subject, body, html_body = email_alerts.format_down(name, detail, url=url, ts=opened_at, context=context)
-        else:
-            subject, body, html_body = email_alerts.format_recovered(name, detail, url=url, ts=time.time(),
-                                                                       context=context)
-        email_alerts.send(subject, body, html_body)
-        if incident_id is not None:
-            db.record_incident_event(incident_id, time.time(), "email_sent", subject)
+        item = {"name": name, "detail": detail, "url": url, "incident_id": incident_id, "context": context,
+                # The incident's own `started` beats `now` for a down item: it's
+                # when the check actually failed, not when this tick noticed it.
+                "ts": opened_at if kind == "opened" else now}
+        _queue_alert("opened" if kind == "opened" else "resolved", item, now)
+
+
+_PENDING = {"opened": [], "resolved": []}
+_BATCH_STARTED_AT = {"opened": None, "resolved": None}
+
+
+def _queue_alert(kind, item, now):
+    """Buffers one down/resolved item and flushes the whole batch (one
+    consolidated email) once ALERT_BATCH_WINDOW_SEC has passed since the
+    first item queued in it -- see the constant's docstring for why."""
+    _PENDING[kind].append(item)
+    if _BATCH_STARTED_AT[kind] is None:
+        _BATCH_STARTED_AT[kind] = now
+    if now - _BATCH_STARTED_AT[kind] >= ALERT_BATCH_WINDOW_SEC:
+        _flush_batch(kind)
+
+
+def _flush_expired_batches(now):
+    """Catches a batch that's aged past the window with no new item to
+    trigger the check in _queue_alert -- this runs every tick (handle_tick_events
+    is always called, even with zero new events) so a lone down event still
+    gets mailed after the window elapses instead of waiting forever for a
+    second one that may never come."""
+    for kind in ("opened", "resolved"):
+        if _PENDING[kind] and now - _BATCH_STARTED_AT[kind] >= ALERT_BATCH_WINDOW_SEC:
+            _flush_batch(kind)
+
+
+def _flush_batch(kind):
+    items = _PENDING[kind]
+    if not items:
+        return
+    _PENDING[kind] = []
+    _BATCH_STARTED_AT[kind] = None
+    formatter = email_alerts.format_down_batch if kind == "opened" else email_alerts.format_recovered_batch
+    subject, body, html_body = formatter(items)
+    email_alerts.send(subject, body, html_body)
+    sent_at = time.time()
+    for item in items:
+        if item["incident_id"] is not None:
+            db.record_incident_event(item["incident_id"], sent_at, "email_sent", subject)
 
 
 def purge_old_checks():

@@ -39,7 +39,10 @@ from unittest.mock import patch
 
 import db
 import email_alerts
+import monitor_engine
 from monitor_engine import handle_tick_events
+
+monitor_engine.ALERT_BATCH_WINDOW_SEC = 0  # flush every batch immediately, matching this file's per-event assertions
 
 db.DB_PATH = "test_correlated_outage.db"
 if os.path.exists(db.DB_PATH):

@@ -98,6 +98,8 @@ db.init_db()
 import email_alerts
 import monitor_engine
 
+monitor_engine.ALERT_BATCH_WINDOW_SEC = 0  # flush every batch immediately, matching this file's per-event assertions
+
 # --- a plain send() actually reaches the server over a real socket ---
 assert email_alerts.send("[TEST] subject line", "body text here") is True
 assert smtp.wait_for(1), "no message arrived at the SMTP server"
