@@ -867,10 +867,19 @@ button:focus-visible {
 
 /* ---------- Responsive (Decision 6.1) ---------- */
 
+/* Own breakpoint, wider than the 640px one below: at tablet widths (~768px)
+   there's enough room for the target grid/stat cards to stay as-is, but not
+   enough for the header row's three children (brand h1, counts, actions) to
+   share one line -- flex wrap broke "Rovix Monitoring" and the timestamp
+   independently, landing them at different heights (design-review
+   FINDING-002). Stacking here uses the exact same treatment already proven
+   at mobile widths, just triggered earlier. */
+@media (max-width: 900px) {
+  .summary-bar { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
+}
+
 @media (max-width: 640px) {
   .dashboard { padding: var(--space-4) var(--space-3); }
-
-  .summary-bar { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
 
   .target-grid { grid-template-columns: 1fr; }
 
