@@ -71,6 +71,8 @@ a:visited { color: #8a6fd8; }
 .summary-bar.calm { opacity: 0.94; }
 
 .summary-bar .brand {
+  margin: 0; /* now a real <h1> (design-review FINDING-001) -- the browser's
+                default h1 margin would otherwise throw off the header row */
   font-weight: 700;
   font-size: 17px;
   letter-spacing: 0.01em;

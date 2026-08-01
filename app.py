@@ -79,7 +79,7 @@ def build_summary_or_banner():
     bar = html.Div(
         className="summary-bar calm",
         children=[
-            html.Div("Rovix Monitoring", className="brand"),
+            html.H1("Rovix Monitoring", className="brand"),
             html.Div(
                 className="counts",
                 children=[
@@ -567,7 +567,7 @@ def serve_layout():
             html.Div(
                 className="section-heading-row",
                 children=[
-                    html.Div("Monitored targets", className="section-heading"),
+                    html.H2("Monitored targets", className="section-heading"),
                     html.Button("+ Add Monitor", id="add-monitor-open", className="ack-btn", n_clicks=0),
                 ],
             ),
@@ -584,9 +584,9 @@ def serve_layout():
                                     className="target-filter", value="", debounce=True),
             ),
             html.Div(id="grid-slot", children=build_skeleton_grid()),
-            html.Div("Server health", className="section-heading"),
+            html.H2("Server health", className="section-heading"),
             html.Div(id="server-panel-slot", children=build_skeleton_server_panel()),
-            html.Div("Incident history", className="section-heading"),
+            html.H2("Incident history", className="section-heading"),
             html.Div(id="incident-slot", children=build_skeleton_incident_table()),
             # Detail slide-over skeleton — always present so callbacks can
             # reference detail-close/detail-backdrop; visibility via CSS class.
