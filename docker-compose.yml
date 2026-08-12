@@ -4,6 +4,12 @@
 # The Dockerfile says HOW to build the apartment; this file says WHERE it
 # sits, what's plugged into it, and what's kept when the tenant moves out
 # and back in (a rebuild).
+#
+# CURRENT SETUP: reached directly at http://<vps-ip>:5000 -- no domain, no
+# reverse proxy yet. That's why "ports:" publishes straight to the internet
+# below. When a domain is ready later, the port publish gets removed and
+# Rovix instead joins whichever reverse proxy (Traefik/Caddy) already owns
+# 80/443 on this VPS, same as its other services -- see DEPLOY_HOSTINGER.md.
 
 services:
   rovix-uptime:
@@ -15,11 +21,18 @@ services:
     # working directory -- this line tells Docker to hand the container a
     # REAL .env file from the VPS disk, so the same env_file.py code path
     # works unchanged whether it's run bare (Windows dev, DEPLOY_HOSTINGER.md
-    # systemd) or in a container. Create this file on the VPS from
-    # .env.example before first start; it is never baked into the image
-    # (see .dockerignore) and never committed to git.
+    # systemd) or in a container. Created on the VPS from .env.example; it
+    # is never baked into the image and never committed to git.
     env_file:
       - .env
+
+    # Publishes container port 8050 (see Dockerfile's EXPOSE) to the VPS's
+    # own port 5000, confirmed free with `ss -tlnp | grep 5000` before
+    # choosing it. Format is "HOST_PORT:CONTAINER_PORT". Reachable at
+    # http://<vps-ip>:5000 once Hostinger's panel firewall (a layer above
+    # ufw) also allows 5000 in -- see DEPLOY_HOSTINGER.md Step 0.
+    ports:
+      - "5000:8050"
 
     # VOLUMES: the fix for "containers are disposable by default". Without
     # these, rovix.db (every monitor, incident, and user account) and the
@@ -39,27 +52,7 @@ services:
       - rovix-session-key:/app/.session_secret.key   # login sessions survive a rebuild
       - rovix-logos:/app/assets/logos                # uploaded client logos
 
-    # NOT "ports: - 8050:8050". Publishing a port straight to the internet
-    # is how a container becomes reachable WITHOUT going through Caddy --
-    # fine for something like Postgres that should only be reached by other
-    # containers, wrong for a website. Rovix instead joins the same Docker
-    # network Caddy is already on, and Caddy reaches it by container name
-    # (see caddy_uptime_addition.txt) -- exactly how every other web-facing
-    # service on this VPS is already set up.
-    networks:
-      - caddy_default   # must match whatever network app-caddy-1 is actually on
-
-    # Two things this container's app.py boots on __main__: the volumes
-    # above only get created on `docker compose up`, not on `docker build` --
-    # this is intentional Docker Compose behavior, no action needed.
-
 volumes:
   rovix-db:
   rovix-session-key:
   rovix-logos:
-
-networks:
-  caddy_default:
-    external: true   # "external" = this network already exists (Caddy made
-                      # it); Compose must NOT try to create its own -- see
-                      # Step A in the next message for how to find its real name
