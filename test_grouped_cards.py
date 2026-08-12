@@ -52,20 +52,34 @@ assert _strip_type_suffix("brand (Website)") == "brand"
 assert _strip_type_suffix("brand (TCP)") == "brand"
 assert _strip_type_suffix("plain name") == "plain name"
 
-# --- build_target_card: single target renders unchanged (clickable button, tcard id) ---
-card = build_target_card([targets[solo_id]])
-assert card.id == {"type": "tcard", "index": solo_id}
-assert "target-card" in card.className and "clickable" in card.className
+# --- build_target_card: single target still renders one clickable button
+# carrying the tcard id. The card is now a <div> wrapping that button (the
+# site-link <a> cannot nest inside a <button>), so this asserts the click
+# target exists rather than the outermost tag. ---
+from test_helpers import tcard_ids, by_class
 
-# --- build_target_card: grouped targets render one card with a subrow per type ---
-db.update_monitor_state(web_id, "up", 0, 2, 1000.0, 50)
+card = build_target_card([targets[solo_id]])
+assert tcard_ids(card) == [solo_id], tcard_ids(card)
+assert "target-card" in card.className, card.className
+assert by_class(card, "clickable"), "card must expose a clickable hit area"
+
+# --- build_target_card: grouped targets render one <details> card with a
+# subrow per type, collapsed by default -- one up + one down is a "mixed"
+# (grey) tier now, not the old worst-of-group "any one down = red" rule ---
+import time
+
+db.update_monitor_state(web_id, "up", 0, 2, time.time(), 50)
 db.update_monitor_state(tcp_id, "down", 3, 0, 1000.0, None)
 refreshed = {t["id"]: t for t in data.get_targets()}
 group_targets = [refreshed[web_id], refreshed[tcp_id]]
 
 grouped_card = build_target_card(group_targets)
-assert "status-down" in grouped_card.className, grouped_card.className  # worst-of-group status
-subrows = [c for c in grouped_card.children if getattr(c, "id", None) and c.id.get("type") == "tcard"]
+assert "status-mixed" in grouped_card.className, grouped_card.className
+assert grouped_card.open is False
+from test_helpers import one_by_class
+
+subrows_wrapper = one_by_class(grouped_card, "target-card-subrows")
+subrows = [c for c in subrows_wrapper.children if getattr(c, "id", None) and c.id.get("type") == "tcard"]
 assert len(subrows) == 2
 subrow_ids = {c.id["index"] for c in subrows}
 assert subrow_ids == {web_id, tcp_id}

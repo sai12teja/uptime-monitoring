@@ -7,6 +7,7 @@ Run: ./venv/Scripts/python.exe test_page_monitoring.py
 """
 import os
 import sqlite3
+import time
 
 import db
 
@@ -36,7 +37,7 @@ assert targets[plain_id]["subrow_label"] is None
 assert targets[about_id]["subrow_label"] == "/about"
 
 # --- _parse_paths: blank input means "no fan-out" ---
-from app import (_parse_paths, _url_with_path, _default_interval, _build_entries,
+from app import (_parse_paths, _merge_paths, _url_with_path, _default_interval, _build_entries,
                   _strip_type_suffix, build_target_card)
 
 assert _parse_paths("") == [None]
@@ -45,6 +46,12 @@ assert _parse_paths("/about") == ["/about"]
 assert _parse_paths("/\n/about\n/contact") == ["/", "/about", "/contact"]
 assert _parse_paths("/about\n\n/contact") == ["/about", "/contact"]  # blank lines skipped
 
+# --- _merge_paths: discovery checklist + manual textarea, deduped ---
+assert _merge_paths([], "") == [None]  # Discover never used, textarea blank -> unchanged today
+assert _merge_paths(["/a", "/b"], "") == ["/a", "/b"]
+assert _merge_paths([], "/c\n/d") == ["/c", "/d"]
+assert _merge_paths(["/a"], "/a\n/b") == ["/a", "/b"]  # dedup, discovered paths first
+
 # --- _url_with_path joins cleanly regardless of slashes ---
 assert _url_with_path("https://example.com", None) == "https://example.com"
 assert _url_with_path("https://example.com", "/about") == "https://example.com/about"
@@ -52,10 +59,11 @@ assert _url_with_path("https://example.com/", "/about") == "https://example.com/
 assert _url_with_path("https://example.com", "about") == "https://example.com/about"
 assert _url_with_path("https://example.com", "/") == "https://example.com/"
 
-# --- _default_interval: root path keeps 60s, sub-pages default slower, explicit always wins ---
-assert _default_interval(None, None) == 60
-assert _default_interval("/", None) == 60
-assert _default_interval("/about", None) == 300
+# --- _default_interval: every path defaults to 600s (10 min) now -- user
+# request to cut check frequency ~10x; explicit value always still wins ---
+assert _default_interval(None, None) == 600
+assert _default_interval("/", None) == 600
+assert _default_interval("/about", None) == 600
 assert _default_interval("/about", 45) == 45
 assert _default_interval(None, 120) == 120
 
@@ -98,16 +106,20 @@ contact_id = data.add_target("Vrittispace — /contact", "https://vrittispace.ex
 about2_id = data.add_target("Vrittispace — /about", "https://vrittispace.example/about", "website",
                              group_key="grp2", subrow_label="/about")
 db.update_monitor_state(contact_id, "down", 3, 0, 1000.0, None)
-db.update_monitor_state(about2_id, "up", 0, 2, 1000.0, 40)
+db.update_monitor_state(about2_id, "up", 0, 2, time.time(), 40)
 refreshed = {t["id"]: t for t in data.get_targets()}
 group = [refreshed[contact_id], refreshed[about2_id]]
 card = build_target_card(group)
-assert "status-down" in card.className, card.className  # worst-of-group status, still free
+assert "status-mixed" in card.className, card.className  # one up + one down -> mixed, not red
+
+from test_helpers import one_by_class, by_class
 
 subrow_labels = []
-for child in card.children:
+for child in one_by_class(card, "target-card-subrows").children:
     if getattr(child, "id", None) and child.id.get("type") == "tcard":
-        subrow_labels.append(child.children[1].children)  # dot, label, status[, time]
+        # Label found by class rather than child index -- a subrow is
+        # [dot, label, status] with an optional trailing response time.
+        subrow_labels.append(by_class(child, "target-card-subtype")[0].children)
 assert "/contact" in subrow_labels, subrow_labels
 assert "/about" in subrow_labels, subrow_labels
 

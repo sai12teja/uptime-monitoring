@@ -1,0 +1,38 @@
+[Unit]
+Description=Rovix Uptime Monitoring Dashboard
+After=network.target
+
+[Service]
+# Change if you deploy under a different account. www-data cannot write to
+# the project directory by default -- either chown it (see DEPLOY_HOSTINGER.md
+# Step 2) or run as the account that owns the files.
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/rovixdashboard
+
+# --workers 1 is not a tuning choice, it is REQUIRED. auth.py's login
+# rate-limiter (_ATTEMPTS in auth.py) lives in process memory -- a second
+# worker would keep its own independent counter, so an attacker splitting
+# guesses across two workers gets 2x the real attempt budget before either
+# one locks out. monitor_engine's background scheduler is also started once
+# per process (app.py's __main__), so >1 worker would run the check loop
+# multiple times, hitting every monitored site N-times-as-often and sending
+# duplicate alert emails per incident.
+ExecStart=/var/www/rovixdashboard/venv/bin/gunicorn \
+    --workers 1 \
+    --threads 4 \
+    --bind 127.0.0.1:8000 \
+    --timeout 60 \
+    app:server
+
+Restart=always
+RestartSec=5
+
+# env_file.py (loaded at the top of app.py) reads .env from the working
+# directory itself, so no EnvironmentFile= line is needed here -- unlike the
+# generic report's version of this unit. If you prefer systemd-managed
+# secrets instead of the .env file, uncomment this and delete .env:
+# EnvironmentFile=/var/www/rovixdashboard/.env
+
+[Install]
+WantedBy=multi-user.target

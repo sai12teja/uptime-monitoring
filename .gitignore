@@ -34,6 +34,10 @@ ENV/
 *.sqlite
 *.sqlite3
 
+# --- Archives (may bundle rovix.db / secrets -- .gitignore can't see inside
+# a zip to exclude just the db file, so the whole archive is excluded) -----
+*.zip
+
 # --- JS/Node & vendored deps (kept for stack coverage, unused today) -------
 node_modules/
 vendor/

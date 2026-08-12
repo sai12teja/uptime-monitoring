@@ -73,7 +73,7 @@ def register_api(server):
         url = (body.get("url") or "").strip()
         target_type = body.get("type") or "website"
         keyword = (body.get("keyword") or "").strip() or None
-        interval_sec = body.get("interval_sec") or 60
+        interval_sec = body.get("interval_sec") or db.DEFAULT_CHECK_INTERVAL_SEC
         port = body.get("port")
         retries = body.get("retries")
         timeout_sec = body.get("timeout_sec")

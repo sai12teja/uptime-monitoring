@@ -1,10 +1,12 @@
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
 :root {
-  /* Decision 4.1 token set — dark-mode-first, checked during incidents at night */
-  --color-bg: #0f1115;
-  --color-surface: #171a21;
-  --color-surface-2: #1e222b;
+  /* Decision 4.1 token set — dark-mode-first, checked during incidents at night.
+     Deepened + bluer surfaces (premium-polish pass) so cards separate from the
+     page instead of blending into one flat plane. */
+  --color-bg: #0b0d12;
+  --color-surface: #151821;
+  --color-surface-2: #1c202b;
   --color-text-primary: #e6e8eb;
   --color-text-secondary: #9aa3ad;
   --color-border: #2a2f3a;
@@ -15,10 +17,15 @@
   --color-status-down-bg: #2a1517;
   --color-status-warning: #d9a441;
   --color-status-warning-bg: #26200f;
-  --color-status-unknown: #7a8290;
-  --color-status-unknown-bg: #1c1f26;
+  /* Amber, not grey: "awaiting"/"mixed" are states worth noticing, and the
+     old #7a8290 sat at 4.58:1 on the card surface (barely over the AA floor)
+     where it read as disabled rather than pending. Same amber as the warning
+     token so the palette stays three colours, at 7.88:1. */
+  --color-status-unknown: #d9a441;
+  --color-status-unknown-bg: #26200f;
 
   --color-accent: #4d8fe0;
+  --accent-glow: rgba(77, 143, 224, 0.18);
 
   /* 4px spacing scale */
   --space-1: 4px;
@@ -28,9 +35,28 @@
   --space-6: 24px;
   --space-8: 32px;
 
-  --radius: 6px;
+  --radius: 8px;
+  --radius-lg: 12px;
   --font-ui: 'IBM Plex Sans', -apple-system, sans-serif;
   --font-mono: 'IBM Plex Mono', monospace;
+
+  /* Depth + motion (premium-polish pass) — layered shadows read as "lit from
+     above" on dark surfaces; a bare box-shadow alone looks muddy at this
+     darkness level, so every card also gets a 1px inset top highlight. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45), 0 4px 8px rgba(0, 0, 0, 0.3);
+  --card-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --transition: 160ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -38,55 +64,184 @@
 html, body {
   margin: 0;
   padding: 0;
-  background: var(--color-bg);
   color: var(--color-text-primary);
   font-family: var(--font-ui);
   font-size: 16px; /* accessibility floor — never smaller for body text */
   line-height: 1.5;
 }
 
+body {
+  /* Layered, pure-CSS "aurora" background (premium-polish pass, v2 -- the
+     first pass was too faint to read as anything). Three soft color blobs
+     (blue/purple/green, echoing the accent + status palette already in
+     use) plus a fine dot grid and a grain overlay (::before below) give
+     the page real texture without any external image asset or JS.
+     background-attachment:fixed keeps every layer stable while content
+     scrolls underneath it. */
+  position: relative;
+  background-color: var(--color-bg);
+  background-image:
+    radial-gradient(ellipse 1000px 650px at 8% -8%, rgba(77, 143, 224, 0.55), transparent 65%),
+    radial-gradient(ellipse 900px 600px at 100% 8%, rgba(167, 139, 250, 0.4), transparent 62%),
+    radial-gradient(ellipse 1000px 700px at 35% 105%, rgba(76, 175, 125, 0.3), transparent 65%),
+    radial-gradient(circle, rgba(255, 255, 255, 0.12) 1px, transparent 1px);
+  background-size: auto, auto, auto, 24px 24px;
+  background-position: 0 0, 0 0, 0 0, 0 0;
+  background-attachment: fixed, fixed, fixed, fixed;
+  background-repeat: no-repeat, no-repeat, no-repeat, repeat;
+}
+
+/* Fine grain, applied as a fixed full-viewport overlay rather than a 4th
+   background-image layer -- SVG feTurbulence noise doesn't tile cleanly
+   as a plain background-image at arbitrary sizes, but a positioned
+   pseudo-element sized to the viewport renders it once, crisply. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.06;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Everything else must render above the grain overlay. */
+.app-shell { position: relative; z-index: 1; }
+
 a { color: var(--color-accent); }
 a:visited { color: #8a6fd8; }
 
 .dashboard {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: var(--space-6) var(--space-4) var(--space-8);
+  /* No max-width/auto-centering -- this now sits beside a persistent
+     sidebar (not a standalone centered page), so centering the content
+     column within main-content's OWN remaining width left a large dead
+     gap between the sidebar and the content on wide screens. Content now
+     fills the available width with a plain, un-centered padding. */
+  padding: var(--space-6) var(--space-6) var(--space-8);
+}
+
+/* ---------- Sidebar navigation (Vapi-inspired redesign) ---------- */
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 220px;
+  flex-shrink: 0;
+  /* Paints its own glow directly rather than relying on transparency to
+     reveal body's background through it -- that depended on exactly where
+     body's gradient happens to fall behind a 220px-wide panel, which
+     wasn't reliably visible. This guarantees color here regardless. */
+  background-color: rgba(21, 24, 33, 0.5);
+  background-image:
+    radial-gradient(ellipse 320px 420px at 20% 0%, rgba(77, 143, 224, 0.55), transparent 70%),
+    radial-gradient(ellipse 320px 420px at 80% 100%, rgba(167, 139, 250, 0.35), transparent 70%);
+  border-right: 1px solid var(--color-border);
+  padding: var(--space-4) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.sidebar-brand {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.3;
+  padding: var(--space-2) var(--space-3);
+}
+
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-nav-item {
+  position: relative;
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.sidebar-nav-item:hover { background: var(--color-surface-2); color: var(--color-text-primary); }
+
+.sidebar-nav-item.active {
+  background: var(--color-surface-2);
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+/* Left-edge accent indicator on the active page -- a second visual cue
+   beyond background/weight so the active item reads at a glance. */
+.sidebar-nav-item.active::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--color-accent);
+}
+
+.main-content {
+  flex: 1;
+  min-width: 0; /* flex children need this to shrink/scroll instead of overflowing */
+}
+
+.content-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.page-title {
+  margin: 0;
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+.page-section.hidden { display: none; }
+
+@media (max-width: 900px) {
+  .app-shell { flex-direction: column; min-height: 0; }
+  .sidebar {
+    width: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-4);
+  }
+  .sidebar-nav { flex-direction: row; flex-wrap: wrap; }
 }
 
 /* ---------- Summary bar / correlated-outage banner (Decision 1.1) ---------- */
 
 .summary-bar {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
   gap: var(--space-4);
-  padding: var(--space-4) var(--space-6);
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius);
   margin-bottom: var(--space-6);
 }
 
-.summary-bar.calm { opacity: 0.94; }
+.summary-bar.calm { opacity: 0.97; }
 
-.summary-bar .brand {
-  margin: 0; /* now a real <h1> (design-review FINDING-001) -- the browser's
-                default h1 margin would otherwise throw off the header row */
-  font-weight: 700;
-  font-size: 17px;
-  letter-spacing: 0.01em;
-}
-
-.summary-bar .counts {
-  font-family: var(--font-mono);
-  font-size: 14px;
-  color: var(--color-text-secondary);
-}
-
-.summary-bar .counts strong { color: var(--color-text-primary); }
-
-.summary-bar .updated-at { color: var(--color-text-secondary); opacity: 0.7; }
+.updated-at { color: var(--color-text-secondary); opacity: 0.7; font-size: 13px; }
 
 .header-actions { display: flex; align-items: center; gap: var(--space-3); }
 
@@ -94,6 +249,154 @@ a:visited { color: #8a6fd8; }
 
 .logout-link { color: var(--color-text-secondary); font-size: 14px; text-decoration: none; }
 .logout-link:hover { text-decoration: underline; }
+
+/* ---------- Stat-card row (Vapi-inspired redesign, real backend data) ---------- */
+
+.summary-stat-row-outer {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3);
+}
+
+.summary-stat-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-sm), var(--card-highlight);
+}
+
+.summary-stat-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-3);
+}
+
+.summary-stat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-3);
+}
+
+.summary-stat-header .summary-stat-title { margin-bottom: 0; }
+
+.summary-stat-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 14px;
+  padding: var(--space-1) 0;
+}
+
+.summary-stat-icon {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.summary-stat-icon.status-up { background: var(--color-status-up); border-radius: 50%; }
+.summary-stat-icon.status-down { background: var(--color-status-down); border-radius: 50%; }
+/* Degraded — amber, between down (red) and up (green). */
+.summary-stat-icon.status-overdue { background: var(--color-status-warning); border-radius: 50%; }
+.summary-stat-icon.type-website { background: var(--color-accent); }
+.summary-stat-icon.type-crm { background: var(--color-status-warning); }
+.summary-stat-icon.type-tcp { background: #a78bfa; }
+.summary-stat-icon.type-dns { background: #38bdf8; }
+.summary-stat-icon.type-push { background: var(--color-status-unknown); }
+
+/* Label no longer carries flex:1 -- the hint beside it does, so the hint
+   absorbs the free space and the count still sits flush right. */
+.summary-stat-label { color: var(--color-text-primary); }
+
+/* Plain-language gloss ("every check failing") so the row explains itself
+   instead of needing the reader to already know what Down vs Degraded mean. */
+.summary-stat-hint {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.summary-stat-value {
+  font-weight: 600;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.summary-stat-footer {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.summary-stat-big-number {
+  font-size: 32px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+
+.window-toggle { display: flex; gap: 2px; }
+
+.window-btn {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 2px var(--space-2);
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition), color var(--transition);
+}
+
+.window-btn:hover:not(.active) { border-color: var(--color-accent); color: var(--color-text-primary); }
+
+.window-btn.active {
+  color: var(--color-text-primary);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.all-clear-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-6);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm), var(--card-highlight), 0 0 24px rgba(76, 175, 125, 0.06);
+}
+
+.all-clear-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-status-up-bg);
+  color: var(--color-status-up);
+  font-size: 22px;
+  border: 1px solid var(--color-status-up);
+}
+
+.all-clear-title { font-size: 17px; font-weight: 700; }
+.all-clear-desc { color: var(--color-text-secondary); font-size: 14px; }
 
 .stale-banner {
   display: flex;
@@ -125,10 +428,10 @@ a:visited { color: #8a6fd8; }
 /* ---------- Section headings ---------- */
 
 .section-heading {
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   color: var(--color-text-secondary);
   margin: var(--space-8) 0 var(--space-3) 0;
 }
@@ -147,18 +450,111 @@ a:visited { color: #8a6fd8; }
 
 .target-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: var(--space-3);
+  /* 280px min (was 240) -- on a wide screen 240px produced 6+ very wide,
+     very short columns that read as stretched bars rather than cards. */
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-4);
 }
 
 .target-card {
   position: relative;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: var(--space-4);
+  box-shadow: var(--shadow-sm), var(--card-highlight);
   overflow: hidden;
+  /* Normalizes the two card shapes: a solo card has 3 content rows (name /
+     status / meta) while a collapsed grouped card has 2 (name+dot / meta).
+     Without a floor they'd stagger in the same grid row. Expanded cards
+     grow past this freely -- it's a minimum, not a fixed height. */
+  min-height: 104px;
 }
+
+/* Wrapper for a solo card + its overlaid site link (the link cannot be a
+   child of the card, which is a <button>). It is the grid item, so it
+   carries the card's own min-height rather than imposing one. */
+/* Solo card: the outer .target-card is a plain <div> carrying all the card
+   chrome, and .target-card-hit is the <button> inside it holding the name +
+   status. The button is stripped of its own surface/border so the two read
+   as one card, and stretches to fill the space above the meta row so the
+   whole card face stays clickable.
+   Scoped to :has(), NOT .target-card itself -- a grouped card is a <details>
+   carrying .clickable, whose display:block would fight a flex declaration
+   on the shared .target-card class. */
+.target-card:has(> .target-card-hit) {
+  display: flex;
+  flex-direction: column;
+}
+
+.target-card-hit {
+  display: block;
+  width: 100%;
+  flex: 1;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  border-radius: inherit;
+  text-align: left;
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.target-card-hit:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ---------- Clickable site domain ---------- */
+
+/* Accent blue, and :link/:visited are both pinned to it. The global
+   `a:visited` rule (specificity 0,1,1) outranks a bare `.target-card-link`
+   class (0,1,0), so without listing both states every domain the user has
+   actually opened would turn purple and the grid would read as a random mix.
+   A card link's colour should track status, never browsing history. */
+.target-card-link,
+.target-card-link:link,
+.target-card-link:visited {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-accent);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  border-radius: var(--radius);
+  transition: color var(--transition);
+}
+
+/* On a solo card the link overlays the button (it cannot be a child of it),
+   pinned to the bottom-right clear of the meta line on the left. z-index
+   puts it above the button's own surface so it receives its own clicks. */
+/* Lighter than the resting accent, not the same blue -- hover has to be
+   visibly different now that the idle state is already accent-coloured. */
+.target-card-link:hover,
+.target-card-link:focus-visible {
+  color: #7db3f0;
+  text-decoration: underline;
+}
+
+.target-card-link:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* Grouped card: the meta line and the link share one row. */
+.target-card-meta-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.target-card-meta-row > .target-card-meta { flex-shrink: 0; }
 
 .target-card.clickable {
   /* Reset native <button> chrome — we want a card that happens to be a
@@ -173,12 +569,17 @@ a:visited { color: #8a6fd8; }
   font-size: inherit;
   color: inherit;
   cursor: pointer;
-  transition: border-color 0.15s ease, transform 0.15s ease;
+  transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition);
 }
 
 .target-card.clickable:hover {
   border-color: var(--color-accent);
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md), var(--card-highlight), 0 0 0 3px var(--accent-glow);
+}
+
+.target-card.clickable:active {
+  transform: translateY(-2px) scale(0.995);
 }
 
 .target-card.clickable:focus-visible {
@@ -198,20 +599,125 @@ a:visited { color: #8a6fd8; }
 .target-card.status-down::before { background: var(--color-status-down); }
 .target-card.status-overdue::before { background: var(--color-status-warning); }
 .target-card.status-awaiting::before { background: var(--color-status-unknown); }
+.target-card.status-mixed::before { background: var(--color-status-unknown); }
 
 /* Strip + border only, no tinted fill — three stacked red signals made a
-   down card shout over the rest of the grid and hurt row-text contrast. */
+   down card shout over the rest of the grid and hurt row-text contrast.
+   A faint outer glow (not a fill) gives severity depth without repeating
+   that mistake. */
 .target-card.status-down {
   border-color: var(--color-status-down);
+  box-shadow: var(--shadow-sm), var(--card-highlight), 0 0 16px rgba(229, 72, 77, 0.15);
 }
 
-.target-card.status-down.clickable:hover { border-color: #ff6b70; }
+.target-card.status-down.clickable:hover {
+  border-color: #ff6b70;
+  box-shadow: var(--shadow-md), var(--card-highlight), 0 0 0 3px var(--accent-glow), 0 0 20px rgba(229, 72, 77, 0.2);
+}
+
+/* Grouped-card 3-tier border (details tag only -- a solo card is a <button>
+   and keeps its plain default border for up/awaiting/overdue, since there's
+   no "mix" possible with a single monitor). */
+details.target-card.status-up { border-color: var(--color-status-up); }
+details.target-card.status-mixed { border-color: var(--color-status-unknown); }
 
 .target-card-name {
   font-weight: 600;
   font-size: 15px;
   margin-bottom: var(--space-2);
   word-break: break-word;
+  letter-spacing: -0.01em;
+  /* Solo cards use a plain div here, grouped cards a <summary>; both need
+     the favicon + title on one aligned row. */
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* ---------- Site icon (favicon + letter-badge fallback) ---------- */
+
+.site-icon {
+  position: relative;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  overflow: hidden;
+  /* Badge colour is derived from the site name (--badge-hue is set inline
+     per card) so it's stable across renders and distinct between sites. */
+  background: hsl(var(--badge-hue, 220), 42%, 34%);
+}
+
+.site-icon-letter {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: #fff;
+}
+
+/* Sits ON TOP of the letter badge. If the favicon 404s or the site blocks
+   hotlinking, an empty-alt broken image renders nothing at all, so the
+   badge underneath simply shows through -- graceful fallback with no JS
+   error handler and no layout shift either way. */
+.site-icon-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--color-surface-2);
+}
+
+/* The grouped card's collapsed face is the whole <summary> (it wraps both
+   the title row and the meta/link row, since a collapsed <details> renders
+   only its first child). Drop the browser's default disclosure marker; a
+   CSS-only chevron on the title row replaces it so the collapse/expand
+   affordance stays discoverable at a glance. */
+summary.target-card-summary {
+  cursor: pointer;
+  list-style: none;
+}
+summary.target-card-summary::-webkit-details-marker { display: none; }
+
+/* Title takes the free space, so the favicon stays pinned left and the
+   status dot + chevron sit flush right regardless of name length. */
+.target-card-title { flex: 1; min-width: 0; }
+
+/* Chevron rides the title row, not the summary -- the summary is now two
+   rows tall, so an ::after on it would sit beside the whole block. */
+summary.target-card-summary > .target-card-name::after {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  margin-left: var(--space-2);
+  border-right: 2px solid var(--color-text-secondary);
+  border-bottom: 2px solid var(--color-text-secondary);
+  transform: rotate(-45deg);
+  transition: transform var(--transition);
+}
+
+details[open] > summary.target-card-summary > .target-card-name::after {
+  transform: rotate(45deg);
+}
+
+.target-card-subrows {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+@keyframes subrows-reveal {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+details[open] > .target-card-subrows {
+  animation: subrows-reveal 180ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .target-card-status {
@@ -234,9 +740,23 @@ a:visited { color: #8a6fd8; }
    the tree than each subrow's dot/label, and a bare descendant selector
    would let that ancestor's color win over the subrow's real status. */
 .status-up > .status-dot { background: var(--color-status-up); }
-.status-down > .status-dot { background: var(--color-status-down); }
+.status-down > .status-dot {
+  background: var(--color-status-down);
+  /* Motion as a severity signal, not just color (PRD §13: the page's overall
+     visual energy should itself communicate "something's wrong"). Global
+     prefers-reduced-motion override (top of file) disables this. */
+  animation: status-pulse 2s ease-in-out infinite;
+}
 .status-overdue > .status-dot { background: var(--color-status-warning); }
+
+@keyframes status-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(229, 72, 77, 0.5); }
+  50% { box-shadow: 0 0 0 4px rgba(229, 72, 77, 0); }
+}
 .status-awaiting > .status-dot { background: var(--color-status-unknown); }
+/* Grouped-card "mixed" tier (some up, some not) -- without this the
+   collapsed card's dot would render with no background at all. */
+.status-mixed > .status-dot { background: var(--color-status-unknown); }
 
 .status-up > .status-label { color: var(--color-status-up); }
 .status-down > .status-label { color: var(--color-status-down); }
@@ -245,9 +765,24 @@ a:visited { color: #8a6fd8; }
 
 .target-card-meta {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   color: var(--color-text-secondary);
 }
+
+/* Meta text yields to the link when space is tight rather than pushing it
+   off the card; both live in the same flex row so they can never overlap. */
+.target-card-meta-row > .target-card-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The grouped card's meta row sits inside <summary>, where a click also
+   toggles the <details>. interactions.js stops propagation on the anchor so
+   the link navigates instead of expanding the card; this just keeps the
+   anchor its own hit target. */
+summary.target-card-summary .target-card-link { position: relative; z-index: 1; }
 
 /* Grouped card — one multi-select submission, one status line per check type */
 .target-card-subrow {
@@ -257,28 +792,37 @@ a:visited { color: #8a6fd8; }
   width: 100%;
   background: none;
   border: none;
+  border-radius: var(--radius);
   border-top: 1px solid var(--color-border);
-  padding: var(--space-2) 0;
-  margin: 0;
+  /* Horizontal padding + matching negative margin: gives the hover tint
+     room to render behind the text without shifting where the text itself
+     visually sits relative to the rest of the card. */
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-2);
+  margin: 0 calc(var(--space-2) * -1);
+  width: calc(100% + var(--space-4));
   font-family: inherit;
   color: inherit;
   font-size: 14px;
   cursor: pointer;
   text-align: left;
+  transition: background-color var(--transition);
 }
 
-.target-card-subrow:last-of-type { padding-bottom: 0; }
+/* Last row keeps zero EXTRA space before the card's own bottom padding —
+   same intent as the original padding-bottom:0, just expressed as a
+   negative bottom margin now that vertical padding is uniform (needed so
+   the hover-tint background can also cover the row's own bottom edge). */
+.target-card-subrow:last-of-type { margin-bottom: calc(var(--space-2) * -1); }
 
 /* Whole row carries its own status colour — an up check reads green end to
    end, anything not up reads in its status colour, so a glance down the
-   card separates healthy from broken without parsing each word. Brightness
-   (not a colour swap) on hover so the status colour survives the hover. */
+   card separates healthy from broken without parsing each word. */
 .target-card-subrow.status-up { color: var(--color-status-up); }
 .target-card-subrow.status-down { color: var(--color-status-down); }
 .target-card-subrow.status-overdue { color: var(--color-status-warning); }
 .target-card-subrow.status-awaiting { color: var(--color-status-unknown); }
 
-.target-card-subrow:hover { filter: brightness(1.3); }
+.target-card-subrow:hover { background: var(--color-surface-2); }
 
 /* Dot is the only non-text item in a baseline-aligned row — nudge it onto
    the text baseline instead of letting it ride high. */
@@ -313,8 +857,9 @@ a:visited { color: #8a6fd8; }
 .stat-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: var(--space-4);
+  box-shadow: var(--shadow-sm), var(--card-highlight);
 }
 
 .stat-head {
@@ -364,9 +909,10 @@ a:visited { color: #8a6fd8; }
 .services-card {
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: var(--space-4);
   margin-top: var(--space-3);
+  box-shadow: var(--shadow-sm), var(--card-highlight);
 }
 
 .services-card-label {
@@ -402,14 +948,26 @@ a:visited { color: #8a6fd8; }
 /* ---------- Loading skeletons (§13.2) ---------- */
 
 .skeleton-block {
+  position: relative;
   background: var(--color-surface-2);
   border-radius: 4px;
-  animation: skeleton-pulse 1.4s ease-in-out infinite;
+  overflow: hidden;
 }
 
-@keyframes skeleton-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.45; }
+/* Shimmer sweep (premium-polish pass) replaces the plain opacity pulse --
+   a light band moves across the block instead of the whole thing fading
+   in/out, reading as "actively loading" rather than just "dim". */
+.skeleton-block::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent);
+  transform: translateX(-100%);
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  100% { transform: translateX(100%); }
 }
 
 .skeleton-card { pointer-events: none; }
@@ -434,11 +992,46 @@ a:visited { color: #8a6fd8; }
 
 .target-filter-wrapper.hidden { display: none; }
 
+/* Sticks to the top of the scroll area. With 42 cards you are usually
+   scrolled down when you decide to search, and filtering shortens the page
+   sharply (42 cards -> 3) -- without this the box scrolls away and the
+   viewport can be left below the remaining results, looking at blank space.
+   The backdrop keeps cards from showing through as they scroll under it. */
+.target-filter-wrapper {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding-top: var(--space-2);
+  background: linear-gradient(to bottom,
+    var(--color-bg) 0%, var(--color-bg) 70%, transparent 100%);
+}
+
+/* Magnifier drawn as a background image on the wrapper rather than an extra
+   element -- the input is a dcc.Input with no room for a child, and a
+   data: URI keeps it asset-free like the rest of this stylesheet. */
+/* Offset from the TOP, not top:50% -- the input carries a 16px bottom margin,
+   so centring against the wrapper's full height would sit the icon low. */
+.target-filter-wrapper::before {
+  content: "";
+  position: absolute;
+  left: 11px;
+  top: 20px;  /* wrapper 8px pad + (39px input height - 15px icon) / 2 */
+  width: 15px;
+  height: 15px;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.65;
+  background: no-repeat center/contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239aa3ad' stroke-width='2.4' stroke-linecap='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='M20 20l-3.6-3.6'/%3E%3C/svg%3E");
+}
+
 .target-filter {
   display: block;
   width: 100%;
-  max-width: 320px;
-  padding: var(--space-2) var(--space-3);
+  max-width: 360px;
+  /* Left padding leaves room for the magnifier drawn on the wrapper below --
+     without an icon the control read as an anonymous empty bar rather than a
+     search box. */
+  padding: var(--space-2) var(--space-3) var(--space-2) 34px;
   margin-bottom: var(--space-4);
   background: var(--color-surface);
   border: 1px solid var(--color-border);
@@ -446,6 +1039,21 @@ a:visited { color: #8a6fd8; }
   color: var(--color-text-primary);
   font-family: var(--font-ui);
   font-size: 14px;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+/* The stylesheet had NO ::placeholder rule, so the hint text fell back to the
+   browser default -- a near-black grey on this dark input, effectively
+   invisible. That is why the box looked empty and unlabelled. */
+.target-filter::placeholder {
+  color: var(--color-text-secondary);
+  opacity: 1;  /* Firefox dims placeholders by default */
+}
+
+.target-filter:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 .target-filter:focus-visible {
@@ -480,7 +1088,8 @@ a:visited { color: #8a6fd8; }
   border-collapse: collapse;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm), var(--card-highlight);
   overflow: hidden;
 }
 
@@ -523,21 +1132,25 @@ a:visited { color: #8a6fd8; }
   border-radius: var(--radius);
   padding: var(--space-1) var(--space-3);
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color var(--transition), background var(--transition), transform var(--transition), box-shadow var(--transition);
   min-height: 32px;
 }
 
 .ack-btn:hover {
   border-color: var(--color-accent);
   background: var(--color-surface);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
 }
+
+.ack-btn:active { transform: translateY(0); }
 
 /* ---------- Empty states (§13.2) ---------- */
 
 .empty-state {
   background: var(--color-surface);
   border: 1px dashed var(--color-border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: var(--space-8) var(--space-6);
   text-align: center;
 }
@@ -574,6 +1187,9 @@ a:visited { color: #8a6fd8; }
   z-index: 50;
   padding: var(--space-6);
   overflow-y: auto;
+  /* Full-height edge panel, not a floating card -- shadow only on the left
+     (facing into the page) rather than the all-sides treatment cards get. */
+  box-shadow: var(--shadow-lg);
 }
 
 .detail-open .detail-panel {
@@ -782,9 +1398,10 @@ a:visited { color: #8a6fd8; }
   overflow-y: auto;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   z-index: 70;
   padding: var(--space-6);
+  box-shadow: var(--shadow-lg);
 }
 
 .add-monitor-modal:focus { outline: none; }
@@ -811,11 +1428,16 @@ a:visited { color: #8a6fd8; }
   color: var(--color-text-primary);
   font-family: var(--font-ui);
   font-size: 14px;
+  transition: border-color var(--transition), box-shadow var(--transition);
 }
 
 .form-input:focus-visible {
+  /* Outline kept for keyboard visibility; the glow is the premium touch,
+     not a replacement for it. */
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
 textarea.form-input { min-height: 60px; font-family: var(--font-mono); resize: vertical; }
@@ -848,6 +1470,39 @@ textarea.form-input { min-height: 60px; font-family: var(--font-mono); resize: v
   margin-top: var(--space-2);
 }
 
+/* ---------- Discover pages (Add Monitor) ---------- */
+
+.discover-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.discover-row .form-label { margin: 0; flex: 1; }
+.discover-btn { flex-shrink: 0; white-space: nowrap; }
+
+.discover-status {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  margin: var(--space-1) 0;
+}
+
+.discover-checklist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  max-height: 160px;
+  overflow-y: auto;
+  margin-bottom: var(--space-2);
+  padding: var(--space-2);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.discover-checklist:empty { display: none; padding: 0; border: none; }
+
 .form-actions {
   display: flex;
   justify-content: flex-end;
@@ -861,7 +1516,10 @@ textarea.form-input { min-height: 60px; font-family: var(--font-mono); resize: v
   color: #fff;
 }
 
-.submit-btn:hover { background: #3f7bc7; }
+.submit-btn:hover {
+  background: #3f7bc7;
+  box-shadow: var(--shadow-sm), 0 0 0 3px var(--accent-glow);
+}
 
 /* ---------- Focus states ---------- */
 
@@ -874,13 +1532,16 @@ button:focus-visible {
 
 /* Own breakpoint, wider than the 640px one below: at tablet widths (~768px)
    there's enough room for the target grid/stat cards to stay as-is, but not
-   enough for the header row's three children (brand h1, counts, actions) to
-   share one line -- flex wrap broke "Rovix Monitoring" and the timestamp
+   enough for the top bar's children (brand h1, timestamp, actions) to share
+   one line -- flex wrap broke "Rovix Monitoring" and the timestamp
    independently, landing them at different heights (design-review
    FINDING-002). Stacking here uses the exact same treatment already proven
-   at mobile widths, just triggered earlier. */
+   at mobile widths, just triggered earlier. (Retargeted from .summary-bar
+   to .content-topbar as the header moved into the sidebar-nav redesign --
+   .summary-bar itself must stay column+stretch so the stat cards keep full
+   width at every screen size.) */
 @media (max-width: 900px) {
-  .summary-bar { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
+  .content-topbar { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
 }
 
 @media (max-width: 640px) {

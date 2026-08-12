@@ -142,6 +142,15 @@ def do_http_check(monitor):
         return False, int((time.monotonic() - start) * 1000), f"Error: {e}"
 
 
+def _problem_type_for(monitor):
+    """Incident problem_type for a monitor's own check kind. Incidents are
+    deduplicated AND resolved by (target, problem_type) (PRD §15), so this
+    has to be stable per monitor -- open and resolve must agree or an
+    incident never closes. website/crm are both plain HTTP requests, so they
+    share the "http" type they have always used."""
+    return {"dns": "dns", "tcp": "tcp", "push": "push"}.get(monitor["type"], "http")
+
+
 def do_tcp_check(monitor):
     """Returns (ok, response_ms, detail) -- same contract as do_http_check."""
     start = time.monotonic()
@@ -207,8 +216,10 @@ def _record_transition(monitor, now, ok, response_ms, detail, fail_threshold=3, 
         fail_threshold=fail_threshold, ok_threshold=ok_threshold,
     )
     db.update_monitor_state(monitor["id"], new_status, fails, oks, now, response_ms)
+    problem_type = _problem_type_for(monitor)
     if opened:
-        incident_id = db.open_incident(monitor["id"], monitor["name"], detail)
+        incident_id = db.open_incident(monitor["id"], monitor["name"], detail,
+                                        problem_type=problem_type)
         # Use the incident's own `started` (set inside open_incident via a
         # fresh time.time() call) rather than this function's `now` -- `now`
         # is captured before the check runs and can be seconds earlier on a
@@ -218,15 +229,15 @@ def _record_transition(monitor, now, ok, response_ms, detail, fail_threshold=3, 
         db.record_incident_event(incident_id, started_ts, "check_failure", detail)
         return ("opened", monitor["name"], detail, incident_id)
     if resolved:
-        open_row = db.get_open_incident(monitor["id"], problem_type="http")
+        open_row = db.get_open_incident(monitor["id"], problem_type=problem_type)
         incident_id = open_row["id"] if open_row else None
-        downtime_sec = db.resolve_incident(monitor["id"])
+        downtime_sec = db.resolve_incident(monitor["id"], problem_type=problem_type)
         return ("resolved", monitor["name"], db.format_duration(downtime_sec), incident_id)
     if not ok and new_status == "down":
         # Still down, not a fresh transition -- a continuing failure on
         # an already-open incident (PRD §12: incident_events logs "check
         # failures"). No email-worthy event, so returns None as before.
-        open_row = db.get_open_incident(monitor["id"], problem_type="http")
+        open_row = db.get_open_incident(monitor["id"], problem_type=problem_type)
         if open_row:
             db.record_incident_event(open_row["id"], now, "check_failure", detail)
     return None

@@ -1,2 +1,7 @@
 dash==2.18.2
 plotly==5.24.1
+# waitress: production WSGI server on Windows (app.py's own __main__ entrypoint).
+waitress==3.0.2; sys_platform == "win32"
+# gunicorn: production WSGI server on Linux (used by the VPS deployment,
+# see DEPLOY_HOSTINGER.md -- driven by systemd, not app.py's __main__).
+gunicorn==23.0.0; sys_platform != "win32"

@@ -1,0 +1,65 @@
+# --- Rovix Uptime Monitoring: how this container fits into the VPS ---
+#
+# Learning notes: "compose" is the paperwork layer on top of the Dockerfile.
+# The Dockerfile says HOW to build the apartment; this file says WHERE it
+# sits, what's plugged into it, and what's kept when the tenant moves out
+# and back in (a rebuild).
+
+services:
+  rovix-uptime:
+    build: .
+    container_name: rovix-uptime
+    restart: unless-stopped
+
+    # env_file.py (loaded at the top of app.py) reads a .env from the
+    # working directory -- this line tells Docker to hand the container a
+    # REAL .env file from the VPS disk, so the same env_file.py code path
+    # works unchanged whether it's run bare (Windows dev, DEPLOY_HOSTINGER.md
+    # systemd) or in a container. Create this file on the VPS from
+    # .env.example before first start; it is never baked into the image
+    # (see .dockerignore) and never committed to git.
+    env_file:
+      - .env
+
+    # VOLUMES: the fix for "containers are disposable by default". Without
+    # these, rovix.db (every monitor, incident, and user account) and the
+    # session key would reset to empty on every rebuild. Format is
+    # "VPS_PATH:CONTAINER_PATH" -- the left side is a real folder/file on the
+    # VPS's own disk, the right side is where the app looks for it inside
+    # the container.
+    #
+    # db.py's DB_PATH ("rovix.db") and app.py's SESSION_KEY_PATH
+    # (".session_secret.key") are plain relative filenames, resolved against
+    # /app (the WORKDIR set in the Dockerfile) -- so each is mounted as its
+    # own file, landing exactly where the unmodified app already looks. No
+    # container-specific path logic needed anywhere in the app; the same
+    # code runs unchanged on Windows dev, the systemd deployment, and here.
+    volumes:
+      - rovix-db:/app/rovix.db                      # every monitor/incident/user
+      - rovix-session-key:/app/.session_secret.key   # login sessions survive a rebuild
+      - rovix-logos:/app/assets/logos                # uploaded client logos
+
+    # NOT "ports: - 8050:8050". Publishing a port straight to the internet
+    # is how a container becomes reachable WITHOUT going through Caddy --
+    # fine for something like Postgres that should only be reached by other
+    # containers, wrong for a website. Rovix instead joins the same Docker
+    # network Caddy is already on, and Caddy reaches it by container name
+    # (see caddy_uptime_addition.txt) -- exactly how every other web-facing
+    # service on this VPS is already set up.
+    networks:
+      - caddy_default   # must match whatever network app-caddy-1 is actually on
+
+    # Two things this container's app.py boots on __main__: the volumes
+    # above only get created on `docker compose up`, not on `docker build` --
+    # this is intentional Docker Compose behavior, no action needed.
+
+volumes:
+  rovix-db:
+  rovix-session-key:
+  rovix-logos:
+
+networks:
+  caddy_default:
+    external: true   # "external" = this network already exists (Caddy made
+                      # it); Compose must NOT try to create its own -- see
+                      # Step A in the next message for how to find its real name

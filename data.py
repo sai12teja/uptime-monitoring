@@ -4,6 +4,7 @@
 Correlated-outage detection and feed-staleness are still stubbed below.
 """
 import time
+from urllib.parse import urlparse
 
 import db
 import server_health
@@ -29,6 +30,11 @@ def _target_dict(row, now):
         "response_ms": row["last_response_ms"],
         "group_key": row["group_key"],
         "subrow_label": row["subrow_label"],
+        # Exposed for the card's site icon; no other UI surface shows the
+        # raw URL. favicon_url is the icon the site declares in its HTML
+        # (resolved once at add time / by the backfill), NULL until then.
+        "url": row["url"],
+        "favicon_url": row["favicon_url"],
     }
 
 
@@ -59,6 +65,58 @@ def summary_counts():
     up = sum(1 for t in targets if t["status"] == "up")
     down = sum(1 for t in targets if t["status"] == "down")
     return {"up": up, "down": down, "total": len(targets)}
+
+
+def site_health_counts():
+    """Health counted by SITE, not by individual check.
+
+    summary_counts() counts monitor rows -- 216 checks across 42 sites -- so
+    "14 down" looked wrong next to a 42-card grid and gave no hint whether
+    that meant 14 dead sites or one broken page on a few. A site is:
+      down     - every one of its checks is failing (usually DNS: the domain
+                 doesn't resolve, so nothing above it can work)
+      degraded - some checks fail, some pass (typically one broken page on a
+                 server that is otherwise healthy)
+      up       - everything passing
+    Grouping mirrors the grid exactly (group_key), so the two always agree.
+    """
+    groups = {}
+    for target in get_targets():
+        groups.setdefault(target["group_key"] or f"solo-{target['id']}", []).append(target)
+
+    up = degraded = down = 0
+    for members in groups.values():
+        failing = sum(1 for m in members if m["status"] != "up")
+        if failing == 0:
+            up += 1
+        elif failing == len(members):
+            down += 1
+        else:
+            degraded += 1
+    return {"up": up, "degraded": degraded, "down": down, "total": len(groups)}
+
+
+def monitors_by_type():
+    """Active-monitor count per check type, e.g. {"website": 10, "tcp": 3}."""
+    counts = {}
+    for row in db.list_monitors():
+        counts[row["type"]] = counts.get(row["type"], 0) + 1
+    return counts
+
+
+def incidents_in_window(hours):
+    """Count of incidents that STARTED within the last `hours` hours."""
+    since = time.time() - hours * 3600
+    return len(db.list_incidents(since=since))
+
+
+def avg_incident_duration():
+    """Average resolution time (seconds) across all resolved incidents, or
+    None if none have resolved yet -- never a fabricated 0."""
+    resolved = db.list_incidents(status="resolved")
+    if not resolved:
+        return None
+    return sum(r["resolved"] - r["started"] for r in resolved) / len(resolved)
 
 
 def _incident_dict(inc):
@@ -107,14 +165,39 @@ def acknowledge_incident(incident_id, who):
     db.acknowledge_incident(incident_id, who)
 
 
-def add_target(name, url, target_type, keyword=None, port=None, interval_sec=60,
+def add_target(name, url, target_type, keyword=None, port=None, interval_sec=db.DEFAULT_CHECK_INTERVAL_SEC,
                 retries=None, timeout_sec=None, http_method="GET",
                 http_body=None, http_body_encoding="json", group_key=None, notify=True,
-                subrow_label=None):
+                subrow_label=None, favicon_url=None):
     return db.add_monitor(name, url, target_type, keyword=keyword, port=port, interval_sec=interval_sec,
                            retries=retries, timeout_sec=timeout_sec, http_method=http_method,
                            http_body=http_body, http_body_encoding=http_body_encoding, group_key=group_key,
-                           notify=notify, subrow_label=subrow_label)
+                           notify=notify, subrow_label=subrow_label, favicon_url=favicon_url)
+
+
+def backfill_favicons():
+    """Resolves the declared icon for every active monitor that has no
+    favicon_url yet. Called once at startup in a background thread (never
+    on the request path -- it does one HTTP fetch per distinct host).
+
+    Results are cached per host so a site with 10 page monitors costs one
+    fetch, not ten. A host that resolves to nothing is remembered too, so
+    it isn't retried on every restart within the same run."""
+    import page_discovery  # local import: avoids a cycle at module load
+
+    resolved = {}
+    for row in db.monitors_missing_favicon():
+        host_key = urlparse(row["url"] if "://" in row["url"] else f"https://{row['url']}").netloc
+        if not host_key:
+            continue
+        if host_key not in resolved:
+            try:
+                resolved[host_key] = page_discovery.discover_favicon(row["url"])
+            except Exception:
+                resolved[host_key] = None  # never let a bad site break startup
+        if resolved[host_key]:
+            db.set_favicon_url(row["id"], resolved[host_key])
+    return sum(1 for v in resolved.values() if v)
 
 
 def update_target(target_id, name, url, keyword, interval_sec, port=None,

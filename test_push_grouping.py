@@ -31,14 +31,16 @@ def _fire(component_id):
 def _call_add_edit(edit_open=None, submit=None, **state):
     defaults = dict(name=None, url=None, types=None, keyword=None, port=None, interval=None,
                      retries=None, timeout=None, method=None, body=None, encoding=None, notify=None,
-                     paths_text=None, filter_text=None, selected_id=None, editing_id=None)
+                     paths_text=None, discovered_checked=None, filter_text=None, selected_id=None,
+                     editing_id=None)
     defaults.update(state)
     result = app.add_edit_monitor(
         None, None, None, None, submit, edit_open,
         defaults["name"], defaults["url"], defaults["types"], defaults["keyword"],
         defaults["port"], defaults["interval"], defaults["retries"], defaults["timeout"],
         defaults["method"], defaults["body"], defaults["encoding"], defaults["notify"],
-        defaults["paths_text"], defaults["filter_text"], defaults["selected_id"], defaults["editing_id"],
+        defaults["paths_text"], defaults["discovered_checked"],
+        defaults["filter_text"], defaults["selected_id"], defaults["editing_id"],
     )
     return dict(zip(app.ADD_EDIT_OUTPUT_IDS, result))
 
@@ -112,9 +114,12 @@ print("All Website+Push combined-submit checks passed.")
 targets = {t["id"]: t for t in data.get_targets()}
 group = [targets[web_row["id"]], targets[push_row["id"]]]
 card = build_target_card(group)
-subrows = [c for c in card.children if getattr(c, "id", None) and c.id.get("type") == "tcard"]
+from test_helpers import one_by_class, by_class
+
+subrows = [c for c in one_by_class(card, "target-card-subrows").children
+           if getattr(c, "id", None) and c.id.get("type") == "tcard"]
 assert len(subrows) == 2
-labels = {c.children[1].children for c in subrows}  # TYPE_LABELS text on each subrow
+labels = {by_class(c, "target-card-subtype")[0].children for c in subrows}
 assert labels == {"Website", "Push"}, labels
 
 print("All push-in-grouped-card render checks passed.")

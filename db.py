@@ -13,14 +13,20 @@ import time
 
 DB_PATH = "rovix.db"
 
-SCHEMA = """
+# Single source of truth for the default check interval -- app.py's Add
+# Monitor modal and api.py's REST create-monitor endpoint both fall back to
+# this when no interval is given. Was 60s (homepage) / 300s (sub-page);
+# lowered to 600s (10 min) uniformly per user request to cut check volume.
+DEFAULT_CHECK_INTERVAL_SEC = 600
+
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS monitors (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
     type TEXT NOT NULL,
     keyword TEXT,
-    interval_sec INTEGER NOT NULL DEFAULT 60,
+    interval_sec INTEGER NOT NULL DEFAULT {DEFAULT_CHECK_INTERVAL_SEC},
     consecutive_fails INTEGER NOT NULL DEFAULT 0,
     consecutive_oks INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'awaiting',
@@ -37,7 +43,8 @@ CREATE TABLE IF NOT EXISTS monitors (
     http_body_encoding TEXT DEFAULT 'json',
     group_key TEXT,
     notify INTEGER NOT NULL DEFAULT 1,
-    subrow_label TEXT
+    subrow_label TEXT,
+    favicon_url TEXT
 );
 CREATE TABLE IF NOT EXISTS checks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,6 +97,13 @@ CREATE TABLE IF NOT EXISTS settings (
 
 
 def format_duration(seconds):
+    # resolve_incident() returns None when there was no matching open
+    # incident (a recovery with nothing to close -- e.g. the app restarted
+    # while a monitor was down). Callers hand that straight through, so a
+    # crash here would take down the whole scheduler tick for a monitor that
+    # is actually HEALTHY again.
+    if seconds is None:
+        return "unknown"
     seconds = int(seconds)
     h, rem = divmod(seconds, 3600)
     m, s = divmod(rem, 60)
@@ -138,6 +152,7 @@ def init_db():
         _add_column_if_missing(conn, "monitors", "group_key", "TEXT")
         _add_column_if_missing(conn, "monitors", "notify", "INTEGER NOT NULL DEFAULT 1")
         _add_column_if_missing(conn, "monitors", "subrow_label", "TEXT")
+        _add_column_if_missing(conn, "monitors", "favicon_url", "TEXT")
 
 
 def list_monitors():
@@ -179,10 +194,10 @@ def deactivate_monitor(monitor_id):
         conn.execute("UPDATE monitors SET active = 0 WHERE id = ?", (monitor_id,))
 
 
-def add_monitor(name, url, target_type, keyword=None, interval_sec=60, port=None,
+def add_monitor(name, url, target_type, keyword=None, interval_sec=DEFAULT_CHECK_INTERVAL_SEC, port=None,
                  retries=None, timeout_sec=None, http_method="GET",
                  http_body=None, http_body_encoding="json", group_key=None, notify=True,
-                 subrow_label=None):
+                 subrow_label=None, favicon_url=None):
     # Push monitors are pinged via a secret-token URL rather than actively
     # checked -- the token is always server-generated, never client-supplied.
     push_token = secrets.token_hex(16) if target_type == "push" else None
@@ -190,13 +205,28 @@ def add_monitor(name, url, target_type, keyword=None, interval_sec=60, port=None
         cur = conn.execute(
             "INSERT INTO monitors (name, url, type, keyword, interval_sec, created_at, port, push_token, "
             "retries, timeout_sec, http_method, http_body, http_body_encoding, group_key, notify, "
-            "subrow_label) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "subrow_label, favicon_url) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, url, target_type, keyword, interval_sec, time.time(), port, push_token,
              retries, timeout_sec, http_method, http_body, http_body_encoding, group_key, int(notify),
-             subrow_label),
+             subrow_label, favicon_url),
         )
         return cur.lastrowid
+
+
+def set_favicon_url(monitor_id, favicon_url):
+    with _conn() as conn:
+        conn.execute("UPDATE monitors SET favicon_url = ? WHERE id = ?", (favicon_url, monitor_id))
+
+
+def monitors_missing_favicon():
+    """Active monitors with a reachable http(s) target and no favicon
+    resolved yet -- the backfill worklist."""
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT * FROM monitors WHERE active = 1 AND favicon_url IS NULL "
+            "AND url != '' ORDER BY id"
+        ).fetchall()
 
 
 def get_monitor_by_push_token(push_token):
@@ -358,6 +388,18 @@ def add_user(username, password_hash):
             (username, password_hash, time.time()),
         )
         return cur.lastrowid
+
+
+def set_user_password(user_id, password_hash):
+    """Replace a user's stored hash. Takes an ALREADY-HASHED value -- hashing
+    stays in auth.py so no caller can accidentally persist a plaintext."""
+    with _conn() as conn:
+        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+
+
+def get_user_by_id(user_id):
+    with _conn() as conn:
+        return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
 
 
 def get_user_by_username(username):

@@ -11,17 +11,25 @@ import os
 import re
 import secrets
 import sys
+import threading
 from datetime import datetime
 from urllib.parse import urlparse
 
 import flask
 from dash import Dash, html, dcc, Output, Input, State, ctx, ALL, no_update
 
+# Must run before any module below reads a secret: SESSION_SECRET_KEY is read
+# at import time further down this file, and email_alerts silently no-ops when
+# SMTP_HOST is unset rather than raising. Real env vars still take precedence.
+import env_file
+env_file.load()
+
 import api
 import auth
 import data
 import db
 import monitor_engine
+import page_discovery
 import push
 import server_health
 
@@ -68,27 +76,84 @@ def diff_outage_message(prev_outage, curr_outage):
 
 # ---------- Summary bar / correlated-outage banner (Decision 1.1) ----------
 
-def build_summary_or_banner():
-    if data.is_correlated_outage():
-        return html.Div(
-            className="outage-banner",
-            children="⚠ SERVER UNREACHABLE — ALL CHECKS FAILING",
-        )
+def _format_mttr(avg_seconds):
+    """Display text for the average-resolution-time stat -- "—" (never a
+    fabricated 0) until at least one incident has actually resolved."""
+    return db.format_duration(avg_seconds) if avg_seconds is not None else "—"
 
-    counts = data.summary_counts()
-    bar = html.Div(
-        className="summary-bar calm",
+
+def _window_button_class(window_hours, this_window):
+    return "window-btn active" if window_hours == this_window else "window-btn"
+
+
+def _server_status_label(metrics):
+    """Real aggregate server-health label, not a hardcoded "healthy" --
+    critical if any metric hits the crit threshold, degraded at the warn
+    threshold, matching build_stat_card's existing 80/95 thresholds."""
+    values = [metrics.get(k) for k in ("cpu_pct", "mem_pct", "disk_pct", "inodes_pct")]
+    values = [v for v in values if v is not None]
+    if not values:
+        return "unknown"
+    if any(v >= 95 for v in values):
+        return "critical"
+    if any(v >= 80 for v in values):
+        return "degraded"
+    return "healthy"
+
+
+INCIDENT_WINDOWS = [("1h", 1), ("24h", 24), ("7d", 24 * 7)]
+
+# Sidebar pages (Vapi-inspired redesign): all three stay mounted in the DOM
+# at all times -- switching pages just toggles which one's CSS class is
+# visible, matching the show/hide pattern already used for modals. This
+# means every existing callback keeps targeting the same component ids
+# regardless of which page is on screen, with zero re-plumbing.
+PAGES = ["monitors", "incidents", "server-health"]
+PAGE_TITLES = {"monitors": "Monitors", "incidents": "Incidents", "server-health": "Server Health"}
+
+
+def _nav_item_class(active_page, this_page):
+    return "sidebar-nav-item active" if active_page == this_page else "sidebar-nav-item"
+
+
+def _page_wrapper_class(active_page, this_page):
+    return "page-section" if active_page == this_page else "page-section hidden"
+
+
+def _page_title(active_page):
+    return PAGE_TITLES.get(active_page, "Monitors")
+
+
+def build_topbar(active_page="monitors"):
+    """Persistent header (page title + global actions) -- lives OUTSIDE the
+    per-page toggled sections, so it stays visible and functional no matter
+    which sidebar page is active."""
+    return html.Div(
+        className="content-topbar",
         children=[
-            html.H1("Rovix Uptime Monitoring", className="brand"),
+            html.H1(_page_title(active_page), className="page-title"),
             html.Div(
-                className="counts",
+                className="header-actions",
                 children=[
-                    html.Strong(f"{counts['up']} up"), " · ",
-                    html.Strong(f"{counts['down']} down"), " · ",
-                    "server: ", html.Strong("healthy"),
-                    html.Span(f" · updated {datetime.now().strftime('%H:%M:%S')}", className="updated-at"),
+                    html.Span(f"updated {datetime.now().strftime('%H:%M:%S')}", className="updated-at"),
+                    html.Button("⚙", id="settings-open", className="ack-btn settings-gear",
+                                n_clicks=0, title="Notification settings"),
+                    html.A("Logout", href="/logout", className="logout-link"),
                 ],
             ),
+        ],
+    )
+
+
+def build_skeleton_topbar():
+    # settings-open/logout-link are real, not placeholders -- this project
+    # already learned the hard way (detail-edit-btn) that a callback Input
+    # id only mounted after the first real render can silently eat a click
+    # that lands before the swap. Only the title text is skeletal.
+    return html.Div(
+        className="content-topbar",
+        children=[
+            html.Div(className="skeleton-block", style={"width": "120px", "height": "20px"}),
             html.Div(
                 className="header-actions",
                 children=[
@@ -99,6 +164,102 @@ def build_summary_or_banner():
             ),
         ],
     )
+
+
+def build_summary_or_banner(window_hours=24):
+    if data.is_correlated_outage():
+        return html.Div(
+            className="outage-banner",
+            children="⚠ SERVER UNREACHABLE — ALL CHECKS FAILING",
+        )
+
+    counts = data.summary_counts()
+    server_status = _server_status_label(server_health.read_all())
+    avg_mttr = data.avg_incident_duration()
+    incident_count = data.incidents_in_window(window_hours)
+    by_type = data.monitors_by_type()
+
+    # Counted by SITE, matching the grid's own grouping. The old card counted
+    # individual checks, so "14 down" sat beside a 42-card grid with no way to
+    # tell whether that meant 14 dead sites or one broken page on a handful --
+    # and "down" hid the difference between a domain that doesn't resolve and
+    # a healthy server with one erroring page.
+    sites = data.site_health_counts()
+
+    def stat_row(status_class, label, value, hint):
+        return html.Div(className="summary-stat-row", children=[
+            html.Span(className=f"summary-stat-icon status-{status_class}"),
+            html.Span(label, className="summary-stat-label"),
+            html.Span(hint, className="summary-stat-hint"),
+            html.Span(str(value), className="summary-stat-value"),
+        ])
+
+    status_card = html.Div(
+        className="summary-stat-card",
+        children=[
+            html.Div(f"Site Status · {sites['total']} sites",
+                     className="summary-stat-title"),
+            stat_row("down", "Down", sites["down"], "every check failing"),
+            stat_row("overdue", "Degraded", sites["degraded"], "some checks failing"),
+            stat_row("up", "Up", sites["up"], "all checks passing"),
+            html.Div(
+                f"{counts['down']} of {counts['total']} individual checks failing  ·  "
+                f"avg fix time {_format_mttr(avg_mttr)}  ·  this server: {server_status}",
+                className="summary-stat-footer",
+            ),
+        ],
+    )
+
+    incidents_card = html.Div(
+        className="summary-stat-card",
+        children=[
+            html.Div(className="summary-stat-header", children=[
+                html.Div("Incidents", className="summary-stat-title"),
+                html.Div(className="window-toggle", children=[
+                    html.Button(label, id=f"incident-window-{label}", n_clicks=0,
+                                className=_window_button_class(window_hours, hours))
+                    for label, hours in INCIDENT_WINDOWS
+                ]),
+            ]),
+            html.Div(str(incident_count), className="summary-stat-big-number"),
+            html.Div(
+                "No incidents in this window" if incident_count == 0
+                else f"incident{'s' if incident_count != 1 else ''} started in this window",
+                className="summary-stat-footer",
+            ),
+        ],
+    )
+
+    type_rows = [
+        html.Div(className="summary-stat-row", children=[
+            html.Span(className=f"summary-stat-icon type-{t}"),
+            html.Span(TYPE_LABELS.get(t, t.title()), className="summary-stat-label"),
+            html.Span(str(n), className="summary-stat-value"),
+        ])
+        for t, n in sorted(by_type.items())
+    ] if by_type else [html.Div("No monitors configured yet", className="summary-stat-footer")]
+
+    type_card = html.Div(
+        className="summary-stat-card",
+        children=[html.Div("Monitors by Type", className="summary-stat-title")] + type_rows,
+    )
+
+    children = [html.Div(className="summary-stat-row-outer",
+                          children=[status_card, incidents_card, type_card])]
+
+    if counts["total"] > 0 and counts["down"] == 0:
+        # The real-data equivalent of a "No Issues Found" hero -- shown only
+        # when there's something to celebrate, not decoration on every load.
+        children.append(html.Div(
+            className="all-clear-hero",
+            children=[
+                html.Div("✓", className="all-clear-icon"),
+                html.Div("All Systems Operational", className="all-clear-title"),
+                html.Div(f"All {counts['total']} monitored targets are up.", className="all-clear-desc"),
+            ],
+        ))
+
+    bar = html.Div(className="summary-bar calm", children=children)
 
     if data.is_stale():
         # Decision 2.2 — keep last-known state visible, add a persistent
@@ -127,6 +288,138 @@ def _strip_type_suffix(name):
     return name
 
 
+def _group_status_tier(group):
+    """3-tier health signal for a grouped card: green only when every
+    sub-monitor is up, red only when every sub-monitor is down, grey for
+    any real mix (including one still awaiting/overdue) -- a single bad
+    sub-monitor no longer paints the whole card red on its own."""
+    statuses = [t["status"] for t in group]
+    if all(s == "up" for s in statuses):
+        return "up"
+    if all(s == "down" for s in statuses):
+        return "down"
+    return "mixed"
+
+
+def _favicon_url(url):
+    """The site's OWN /favicon.ico, loaded straight by the browser -- no
+    third-party favicon service, which would hand every monitored domain
+    (including internal/client sites) to that service. Returns None when
+    there's no host to ask (push monitors have no target)."""
+    if not url:
+        return None
+    # TCP/DNS monitors store a bare hostname with no scheme; urlparse would
+    # read that as a path, so give it one before parsing.
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    if not parsed.hostname:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}/favicon.ico"
+
+
+def _site_link(url):
+    """(href, hostname) for the card's clickable domain line, or None when
+    there's no host to link (push monitors have no target).
+
+    Always links the site ROOT, not the monitor's specific path: a card can
+    represent several page monitors, and the domain is what the label shows,
+    so linking one arbitrary sub-page would contradict the visible text.
+    TCP/DNS rows store a bare hostname, hence the same scheme fill-in as
+    _favicon_url."""
+    if not url:
+        return None
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    if not parsed.hostname:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}", parsed.hostname
+
+
+def _badge_letter(name):
+    """First real character of the name, for the fallback badge shown when
+    a site has no favicon."""
+    for char in (name or ""):
+        if char.isalnum():
+            return char.upper()
+    return "?"
+
+
+def _badge_hue(name):
+    """Deterministic hue per name so a site's fallback badge is the same
+    colour on every render (a random one would flicker each refresh)."""
+    return sum(ord(c) for c in (name or "")) * 47 % 360
+
+
+def _group_favicon_target(group):
+    """The group member whose url can actually produce a favicon. A group
+    led by a Push monitor (url="") would otherwise fall back to a letter
+    badge even though its Website sibling knows the real host."""
+    for target in group:
+        if _favicon_url(target.get("url")):
+            return target
+    return None
+
+
+def build_site_link(url):
+    """Clickable domain line for a card. Returns an empty span when the
+    monitor has no linkable host, so the caller's layout row keeps its shape
+    either way.
+
+    target/rel: opens in a new tab so clicking never navigates the dashboard
+    away mid-incident; noopener+noreferrer because these are third-party
+    sites and window.opener access / referrer leakage are both unwanted."""
+    link = _site_link(url)
+    if link is None:
+        return html.Span(className="target-card-link-empty")
+    href, hostname = link
+    return html.A(
+        hostname,
+        href=href,
+        target="_blank",
+        rel="noopener noreferrer",
+        className="target-card-link",
+        title=f"Open {hostname} in a new tab",
+    )
+
+
+def build_site_icon(url, name, favicon_url=None):
+    """Site icon with a coloured letter badge behind it. The badge is a real
+    element underneath, not an onerror JS handler: if the icon 404s or the
+    site blocks hotlinking, the (empty-alt) img renders nothing and the
+    badge simply shows through. No JS, no layout shift either way.
+
+    Prefers the icon the site actually declares in its HTML (resolved once
+    and stored); /favicon.ico is only a last resort, since in practice most
+    real sites 404 there while declaring a custom path."""
+    children = [html.Span(_badge_letter(name), className="site-icon-letter")]
+    src = favicon_url or _favicon_url(url)
+    if src:
+        # No loading="lazy" -- dash 2.18.2's html.Img doesn't accept it.
+        children.append(html.Img(src=src, alt="", className="site-icon-img"))
+    return html.Span(
+        className="site-icon",
+        style={"--badge-hue": str(_badge_hue(name))},
+        children=children,
+    )
+
+
+def _group_summary_text(group):
+    """At-a-glance meta line for a COLLAPSED grouped card, e.g.
+    "6 checks · 2 down". Down count always leads when there is one -- it's
+    the number worth reading first. With no downs but something not yet
+    reporting (awaiting/overdue), report the up count rather than claiming
+    "all up", which would be a lie about monitors that haven't checked."""
+    total = len(group)
+    label = f"{total} check{'s' if total != 1 else ''}"
+    down = sum(1 for t in group if t["status"] == "down")
+    up = sum(1 for t in group if t["status"] == "up")
+    if down == total:
+        return f"{label} · all down"
+    if down:
+        return f"{label} · {down} down"
+    if up == total:
+        return f"{label} · all up"
+    return f"{label} · {up} up"
+
+
 def build_target_card(group):
     """`group` is one-or-more target dicts. A single target (the common
     case, and always true for monitors added one at a time) renders exactly
@@ -146,12 +439,27 @@ def build_target_card(group):
 
         # A real <button>, not a div+role+tabIndex fake — Enter/Space work
         # natively without any extra JS, div-based fakes silently fail this.
-        return html.Button(
+        #
+        # An <a> cannot be nested inside that <button> (invalid HTML; browsers
+        # disagree on which one a click activates), so the meta line moves OUT
+        # of the button and shares a normal flex row with the link. Earlier
+        # this link was absolutely positioned over the card instead, which
+        # printed it on top of the meta text -- a real flex row simply cannot
+        # overlap, so the layout is correct by construction rather than by
+        # tuned percentages.
+        card = html.Button(
             id={"type": "tcard", "index": target["id"]},
-            className=f"target-card clickable status-{status}",
+            className=f"target-card-hit clickable status-{status}",
             n_clicks=0,
             children=[
-                html.Div(target["name"], className="target-card-name"),
+                html.Div(
+                    className="target-card-name",
+                    children=[
+                        build_site_icon(target.get("url"), target["name"],
+                                        target.get("favicon_url")),
+                        html.Span(target["name"], className="target-card-title"),
+                    ],
+                ),
                 html.Div(
                     className=f"target-card-status status-{status}",
                     children=[
@@ -159,11 +467,23 @@ def build_target_card(group):
                         html.Span(STATUS_LABEL[status], className="status-label"),
                     ],
                 ),
-                html.Div(meta_text, className="target-card-meta"),
+            ],
+        )
+        return html.Div(
+            className=f"target-card status-{status}",
+            children=[
+                card,
+                html.Div(
+                    className="target-card-meta-row",
+                    children=[
+                        html.Span(meta_text, className="target-card-meta"),
+                        build_site_link(target.get("url")),
+                    ],
+                ),
             ],
         )
 
-    worst_status = min(group, key=lambda t: STATUS_ORDER[t["status"]])["status"]
+    tier = _group_status_tier(group)
     base_name = _strip_type_suffix(group[0]["name"])
 
     def subrow(t):
@@ -194,11 +514,72 @@ def build_target_card(group):
         return GROUP_ORDER.index(t["type"]) if t["type"] in GROUP_ORDER else len(GROUP_ORDER)
 
     rows = [subrow(t) for t in sorted(group, key=type_rank)]
+    icon_target = _group_favicon_target(group) or {}
 
-    return html.Div(
-        className=f"target-card status-{worst_status}",
-        children=[html.Div(base_name, className="target-card-name")] + rows,
+    # <details>/<summary> -- collapsed by default; expanding reveals the
+    # sub-rows, which scroll internally (.target-card-subrows) rather than
+    # growing the whole card when a site has many pages. Native, no
+    # JS/callback needed. The collapsed face carries a status dot, the site
+    # name and a summary meta line, so it matches a solo card's height
+    # instead of rendering as a one-line bar next to them.
+    return html.Details(
+        open=False,
+        className=f"target-card clickable status-{tier}",
+        children=[
+            # Both the title row AND the meta/link row live INSIDE <summary>:
+            # a collapsed <details> renders only its first child, so anything
+            # left outside the summary is invisible until the card is expanded
+            # -- which is what blanked the check summary and the site link on
+            # every grouped card. The summary is the collapsed card's face.
+            html.Summary(
+                className=f"target-card-summary status-{tier}",
+                children=[
+                    html.Div(
+                        className=f"target-card-name status-{tier}",
+                        children=[
+                            build_site_icon(icon_target.get("url"), base_name,
+                                            icon_target.get("favicon_url")),
+                            html.Span(base_name, className="target-card-title"),
+                            html.Span(className="status-dot"),
+                        ],
+                    ),
+                    html.Div(
+                        className="target-card-meta-row",
+                        children=[
+                            html.Span(_group_summary_text(group), className="target-card-meta"),
+                            build_site_link(icon_target.get("url")),
+                        ],
+                    ),
+                ],
+            ),
+            html.Div(rows, className="target-card-subrows"),
+        ],
     )
+
+
+def _target_matches(target, term):
+    """One monitor vs one lowercase search term. Matches the name, the URL/
+    host, the check type, and the status text -- so "down", "dns", "crm" and
+    a bare domain are all usable searches, not just an exact name prefix."""
+    haystack = " ".join(str(x or "").lower() for x in (
+        target.get("name"), target.get("url"), target.get("type"),
+        target.get("status"), target.get("subrow_label"),
+    ))
+    return term in haystack
+
+
+def _filter_groups(groups, filter_text):
+    """Keeps a whole card when ANY of its checks match, so searching a domain
+    returns the site's card intact rather than a fragment of its rows.
+    Multiple words are AND-ed (each must match somewhere in the group), which
+    makes "nawab down" a useful query."""
+    terms = (filter_text or "").strip().lower().split()
+    if not terms:
+        return groups
+    return [
+        group for group in groups
+        if all(any(_target_matches(t, term) for t in group) for term in terms)
+    ]
 
 
 def _group_targets(targets):
@@ -218,7 +599,11 @@ def _group_targets(targets):
 
 GROUP_LABELS = {"website": "Websites", "crm": "CRM", "tcp": "TCP Ports", "dns": "DNS"}
 GROUP_ORDER = ["website", "crm", "tcp", "dns"]
-SCALE_THRESHOLD = 20  # Decision 7.2 — grouping/filter chrome isn't worth it below this
+SCALE_THRESHOLD = 200  # Decision 7.2 — the type-sectioned grid kicks in above this
+# Separate from SCALE_THRESHOLD on purpose: the two used to share one constant,
+# so raising the grouping threshold to keep one-card-per-domain silently hid the
+# search box as well. A filter is useful long before the grid needs restructuring.
+FILTER_THRESHOLD = 8
 
 
 def build_target_grid(filter_text=None):
@@ -236,6 +621,19 @@ def build_target_grid(filter_text=None):
         )
 
     if len(groups) <= SCALE_THRESHOLD:
+        # Filter applies HERE too. It used to be honoured only in the
+        # type-sectioned branch below, so in the normal grouped view the box
+        # was inert -- typing filtered nothing.
+        groups = _filter_groups(groups, filter_text)
+        if not groups:
+            return html.Div(
+                className="empty-state",
+                children=[
+                    html.Div("No matching monitors", className="empty-state-title"),
+                    html.Div(f"Nothing matches “{filter_text}”. Try a site name, domain, or status "
+                             f"like “down”.", className="empty-state-hint"),
+                ],
+            )
         return html.Div(className="target-grid", children=[build_target_card(g) for g in groups])
 
     # Decision 7.2 — above ~20-25 targets, group by type + add a name filter
@@ -555,47 +953,107 @@ def build_detail_content(target_id):
 
 # ---------- Layout ----------
 
-def serve_layout():
+def build_sidebar(active_page="monitors"):
+    nav_items = [("monitors", "Monitors"), ("incidents", "Incidents"),
+                 ("server-health", "Server Health")]
     return html.Div(
-        className="dashboard",
+        className="sidebar",
         children=[
-            html.Div(id="live-region", **{"aria-live": "polite"}, style={
-                "position": "absolute", "width": "1px", "height": "1px", "overflow": "hidden"
-            }),
-            dcc.Store(id="selected-target"),
-            dcc.Store(id="editing-monitor-id"),
-            # session storage — survives a page reload so a status change
-            # picked up on the next tick is still diffed against the last
-            # known baseline, not reset to "everything just changed."
-            dcc.Store(id="prev-state", storage_type="session"),
-            # Initial render is a skeleton everywhere (§13.2) — the one-shot
-            # initial-load-timer below swaps each slot for real content
-            # shortly after, same as a real API call would.
-            html.Div(id="summary-slot", children=build_skeleton_summary()),
+            html.Div("Rovix Uptime Monitoring", className="sidebar-brand"),
             html.Div(
-                className="section-heading-row",
+                className="sidebar-nav",
                 children=[
-                    html.H2("Monitored targets", className="section-heading"),
-                    html.Button("+ Add Monitor", id="add-monitor-open", className="ack-btn", n_clicks=0),
+                    html.Button(label, id=f"nav-{page}", n_clicks=0,
+                                className=_nav_item_class(active_page, page))
+                    for page, label in nav_items
                 ],
             ),
-            # Always mounted (never conditionally created/destroyed) — hidden
-            # via CSS below the scale threshold. Keeping one real component
-            # in the DOM at all times means exactly one callback can safely
-            # own grid-slot; a component that only sometimes exists forces
-            # either a client-side "not found" error or a second writer with
-            # a race against the periodic refresh (both tried, both worse).
+        ],
+    )
+
+
+def serve_layout():
+    return html.Div(
+        className="app-shell",
+        children=[
+            build_sidebar(),
             html.Div(
-                id="target-filter-wrapper",
-                className="target-filter-wrapper hidden",
-                children=dcc.Input(id="target-filter", type="text", placeholder="Filter by name…",
-                                    className="target-filter", value="", debounce=True),
-            ),
-            html.Div(id="grid-slot", children=build_skeleton_grid()),
-            html.H2("Server health", className="section-heading"),
-            html.Div(id="server-panel-slot", children=build_skeleton_server_panel()),
-            html.H2("Incident history", className="section-heading"),
-            html.Div(id="incident-slot", children=build_skeleton_incident_table()),
+                className="main-content dashboard",
+                children=[
+                    html.Div(id="live-region", **{"aria-live": "polite"}, style={
+                        "position": "absolute", "width": "1px", "height": "1px", "overflow": "hidden"
+                    }),
+                    dcc.Store(id="selected-target"),
+                    dcc.Store(id="editing-monitor-id"),
+                    dcc.Store(id="incident-window-store", data=24),
+                    dcc.Store(id="active-page-store", data="monitors"),
+                    # session storage — survives a page reload so a status change
+                    # picked up on the next tick is still diffed against the last
+                    # known baseline, not reset to "everything just changed."
+                    dcc.Store(id="prev-state", storage_type="session"),
+                    # Persistent header (page title + settings/logout) -- lives
+                    # outside the toggled page sections below, so it's visible
+                    # and functional regardless of which sidebar page is active.
+                    html.Div(id="topbar-slot", children=build_skeleton_topbar()),
+
+                    # ---- Page: Monitors ----
+                    html.Div(
+                        id="page-monitors",
+                        className=_page_wrapper_class("monitors", "monitors"),
+                        children=[
+                            # Initial render is a skeleton everywhere (§13.2) — the
+                            # one-shot initial-load-timer swaps each slot for real
+                            # content shortly after, same as a real API call would.
+                            html.Div(id="summary-slot", children=build_skeleton_summary()),
+                            html.Div(
+                                className="section-heading-row",
+                                children=[
+                                    html.H2("Monitored targets", className="section-heading"),
+                                    html.Button("+ Add Monitor", id="add-monitor-open",
+                                                className="ack-btn", n_clicks=0),
+                                ],
+                            ),
+                            # Always mounted (never conditionally created/destroyed) —
+                            # hidden via CSS below the scale threshold. Keeping one real
+                            # component in the DOM at all times means exactly one
+                            # callback can safely own grid-slot; a component that only
+                            # sometimes exists forces either a client-side "not found"
+                            # error or a second writer racing the periodic refresh.
+                            html.Div(
+                                id="target-filter-wrapper",
+                                className="target-filter-wrapper hidden",
+                                # debounce is in SECONDS, not milliseconds --
+                                # 0.3 waits 300ms after the last keystroke.
+                                # (True would only fire on Enter/blur, which
+                                # makes a search box feel dead while typing;
+                                # a plain 300 means a 5-MINUTE wait.)
+                                children=dcc.Input(id="target-filter", type="text",
+                                                    placeholder="Search name, domain, type or status…",
+                                                    className="target-filter", value="", debounce=0.3),
+                            ),
+                            html.Div(id="grid-slot", children=build_skeleton_grid()),
+                        ],
+                    ),
+
+                    # ---- Page: Incidents ----
+                    html.Div(
+                        id="page-incidents",
+                        className=_page_wrapper_class("monitors", "incidents"),
+                        children=[
+                            html.H2("Incident history", className="section-heading"),
+                            html.Div(id="incident-slot", children=build_skeleton_incident_table()),
+                        ],
+                    ),
+
+                    # ---- Page: Server Health ----
+                    html.Div(
+                        id="page-server-health",
+                        className=_page_wrapper_class("monitors", "server-health"),
+                        children=[
+                            html.H2("Server health", className="section-heading"),
+                            html.Div(id="server-panel-slot", children=build_skeleton_server_panel()),
+                        ],
+                    ),
             # Detail slide-over skeleton — always present so callbacks can
             # reference detail-close/detail-backdrop; visibility via CSS class.
             html.Div(
@@ -729,8 +1187,19 @@ def serve_layout():
                                 id="add-monitor-paths-wrapper",
                                 className="form-field hidden",
                                 children=[
-                                    html.Label("Extra pages to monitor (one path per line, optional)",
-                                                htmlFor="add-monitor-paths", className="form-label"),
+                                    html.Div(
+                                        className="discover-row",
+                                        children=[
+                                            html.Label("Extra pages to monitor (one path per line, optional)",
+                                                        htmlFor="add-monitor-paths", className="form-label"),
+                                            html.Button("Discover pages", id="add-monitor-discover-btn",
+                                                        className="ack-btn discover-btn", n_clicks=0),
+                                        ],
+                                    ),
+                                    html.Div(id="add-monitor-discover-status", className="discover-status"),
+                                    dcc.Checklist(id="add-monitor-discovered",
+                                                  className="form-radio discover-checklist",
+                                                  options=[], value=[]),
                                     dcc.Textarea(id="add-monitor-paths", className="form-input",
                                                  placeholder="/\n/about\n/contact", value=""),
                                 ],
@@ -931,6 +1400,8 @@ def serve_layout():
             ),
             dcc.Interval(id="refresh-interval", interval=REFRESH_INTERVAL_MS, n_intervals=0),
             dcc.Interval(id="initial-load-timer", interval=700, n_intervals=0, max_intervals=1),
+                ],
+            ),
         ],
     )
 
@@ -976,6 +1447,7 @@ push.register_push(app.server)  # push/passive monitor check-in endpoint
 # ---------- Callbacks ----------
 
 @app.callback(
+    Output("topbar-slot", "children"),
     Output("summary-slot", "children"),
     Output("grid-slot", "children"),
     Output("server-panel-slot", "children"),
@@ -984,22 +1456,65 @@ push.register_push(app.server)  # push/passive monitor check-in endpoint
     Input("refresh-interval", "n_intervals"),
     Input("initial-load-timer", "n_intervals"),
     Input("target-filter", "value"),
+    Input("incident-window-store", "data"),
+    Input("active-page-store", "data"),
 )
-def refresh(_n, _initial, filter_text):
+def refresh(_n, _initial, filter_text, window_hours, active_page):
     # Re-reads data.py (real DB-backed checks now) on every tick (periodic
-    # refresh, the one-shot initial load, or a filter keystroke).
-    # target-filter is always mounted (see layout comment), so this single
-    # callback can own grid-slot with no race and no client-side "component
-    # not found" error regardless of target count.
-    is_scale = len(data.get_targets()) > SCALE_THRESHOLD
-    filter_class = "target-filter-wrapper" if is_scale else "target-filter-wrapper hidden"
+    # refresh, the one-shot initial load, a filter keystroke, an
+    # incident-window toggle click, or a sidebar page switch -- the last one
+    # only actually needs topbar-slot's title text, but re-running the rest
+    # is cheap and keeps this the single owner of these slots). target-filter
+    # is always mounted (see layout comment), so this single callback can own
+    # grid-slot with no race and no client-side "component not found" error
+    # regardless of target count.
+    show_filter = len(_group_targets(data.get_targets())) > FILTER_THRESHOLD
+    filter_class = "target-filter-wrapper" if show_filter else "target-filter-wrapper hidden"
     return (
-        build_summary_or_banner(),
+        build_topbar(active_page or "monitors"),
+        build_summary_or_banner(window_hours or 24),
         build_target_grid(filter_text),
         build_server_panel_inner(),
         build_incident_table_inner(),
         filter_class,
     )
+
+
+@app.callback(
+    Output("incident-window-store", "data"),
+    [Input(f"incident-window-{label}", "n_clicks") for label, _ in INCIDENT_WINDOWS],
+    prevent_initial_call=True,
+)
+def set_incident_window(*_clicks):
+    trig = ctx.triggered_id or ""
+    label = trig.removeprefix("incident-window-")
+    for window_label, hours in INCIDENT_WINDOWS:
+        if window_label == label:
+            return hours
+    return no_update
+
+
+@app.callback(
+    Output("active-page-store", "data"),
+    [Input(f"nav-{page}", "n_clicks") for page in PAGES],
+    prevent_initial_call=True,
+)
+def set_active_page(*_clicks):
+    trig = ctx.triggered_id or ""
+    page = trig.removeprefix("nav-")
+    return page if page in PAGES else no_update
+
+
+@app.callback(
+    [Output(f"nav-{page}", "className") for page in PAGES],
+    [Output(f"page-{page}", "className") for page in PAGES],
+    Input("active-page-store", "data"),
+)
+def render_active_page(active_page):
+    active_page = active_page or "monitors"
+    nav_classes = [_nav_item_class(active_page, page) for page in PAGES]
+    page_classes = [_page_wrapper_class(active_page, page) for page in PAGES]
+    return (*nav_classes, *page_classes)
 
 
 @app.callback(
@@ -1143,6 +1658,20 @@ def _parse_paths(raw_text):
     return paths or [None]
 
 
+def _merge_paths(discovered_checked, manual_text):
+    """Combines checked "Discover pages" results with whatever's still
+    hand-typed in the Extra Pages textarea, deduped, discovered paths
+    first. If Discover was never used (discovered_checked empty), this is
+    identical to _parse_paths(manual_text) -- today's behavior, unchanged."""
+    manual = _parse_paths(manual_text)
+    manual = [] if manual == [None] else manual
+    combined = list(discovered_checked or [])
+    for path in manual:
+        if path not in combined:
+            combined.append(path)
+    return combined or [None]
+
+
 def _url_with_path(base_url, path):
     if path is None:
         return base_url
@@ -1150,12 +1679,12 @@ def _url_with_path(base_url, path):
 
 
 def _default_interval(path, explicit_interval):
-    """Homepage (no path, or root '/') keeps the 60s default; any other
-    sub-page defaults slower (300s) so a whole page fleet doesn't multiply
-    check volume 1:1 with the homepage. An explicit value always wins."""
-    if explicit_interval:
-        return explicit_interval
-    return 60 if path in (None, "/", "") else 300
+    """Every check type/path defaults to db.DEFAULT_CHECK_INTERVAL_SEC now
+    (used to be 60s homepage / 300s sub-page). An explicit value always
+    wins. `path` kept in the signature for callers/tests -- no longer
+    changes the outcome, but removing it would be a wider signature churn
+    for zero behavior gain."""
+    return explicit_interval or db.DEFAULT_CHECK_INTERVAL_SEC
 
 
 def _build_entries(name, types, paths):
@@ -1195,8 +1724,40 @@ ADD_EDIT_OUTPUT_IDS = [
     "wrapper_class", "error", "name", "url", "keyword", "summary", "grid",
     "title", "submit_label", "type_value", "type_wrapper_class",
     "port", "interval", "retries", "timeout", "method", "body", "encoding", "notify", "paths",
+    "discovered_options", "discovered_value", "discover_status",
     "editing_id", "detail_content", "delete_confirm_class", "settings_class",
 ]
+
+
+@app.callback(
+    Output("add-monitor-discovered", "options", allow_duplicate=True),
+    Output("add-monitor-discovered", "value", allow_duplicate=True),
+    Output("add-monitor-discover-status", "children", allow_duplicate=True),
+    Input("add-monitor-discover-btn", "n_clicks"),
+    State("add-monitor-url", "value"),
+    prevent_initial_call=True,
+)
+def discover_pages_callback(_n, url):
+    url = (url or "").strip()
+    if not url or not (url.startswith("http://") or url.startswith("https://")):
+        return [], [], "Enter a valid http:// or https:// Target above first."
+
+    paths, total, source = page_discovery.discover_pages(url)
+
+    if source == "blocked":
+        return [], [], "That target isn't allowed (resolves to a private/internal address)."
+    if source == "none":
+        return [], [], "Couldn't find any pages automatically — add paths manually below."
+
+    options = [{"label": p, "value": p} for p in paths]
+    status = f"Found {len(paths)} page{'s' if len(paths) != 1 else ''} via {source}"
+    remaining = total - len(paths)
+    if remaining > 0:
+        status += f" ({remaining} more not shown)"
+    # All pre-checked by default (matches the UptimeRobot reference) -- the
+    # user unchecks what they don't want rather than hunting for a "select
+    # all" button.
+    return options, paths, status
 
 
 @app.callback(
@@ -1220,6 +1781,9 @@ ADD_EDIT_OUTPUT_IDS = [
     Output("add-monitor-encoding", "value"),
     Output("add-monitor-notify", "value"),
     Output("add-monitor-paths", "value"),
+    Output("add-monitor-discovered", "options", allow_duplicate=True),
+    Output("add-monitor-discovered", "value", allow_duplicate=True),
+    Output("add-monitor-discover-status", "children", allow_duplicate=True),
     Output("editing-monitor-id", "data"),
     Output("detail-content", "children", allow_duplicate=True),
     Output("delete-confirm-wrapper", "className", allow_duplicate=True),
@@ -1243,6 +1807,7 @@ ADD_EDIT_OUTPUT_IDS = [
     State("add-monitor-encoding", "value"),
     State("add-monitor-notify", "value"),
     State("add-monitor-paths", "value"),
+    State("add-monitor-discovered", "value"),
     State("target-filter", "value"),
     State("selected-target", "data"),
     State("editing-monitor-id", "data"),
@@ -1250,7 +1815,8 @@ ADD_EDIT_OUTPUT_IDS = [
 )
 def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
                       name, url, types, keyword, port, interval, retries, timeout,
-                      method, body, encoding, notify, paths_text, filter_text, selected_id, editing_id):
+                      method, body, encoding, notify, paths_text, discovered_checked,
+                      filter_text, selected_id, editing_id):
     trig = ctx.triggered_id
     out = {key: no_update for key in ADD_EDIT_OUTPUT_IDS}
 
@@ -1264,6 +1830,7 @@ def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
             type_value=["website"], type_wrapper_class="form-field",
             port="", interval="", retries="", timeout="", method="GET", body="", encoding="json",
             notify=["notify"], paths="",
+            discovered_options=[], discovered_value=[], discover_status="",
             editing_id=None, delete_confirm_class="modal-wrapper addmonitor-hidden",
             settings_class="modal-wrapper addmonitor-hidden",
         )
@@ -1291,6 +1858,7 @@ def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
             encoding=row["http_body_encoding"] or "json",
             notify=["notify"] if row["notify"] else [],
             paths="",  # editing is always a single row -- no fan-out, field is ignored on submit
+            discovered_options=[], discovered_value=[], discover_status="",
             editing_id=selected_id,
         )
         return result()
@@ -1327,7 +1895,8 @@ def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
             # Type is locked in edit mode (pre-filled, checklist hidden), so
             # `types` is always the single original type here.
             data.update_target(
-                editing_id, name, _target_for_type(url, types[0]), keyword, interval or 60,
+                editing_id, name, _target_for_type(url, types[0]), keyword,
+                interval or db.DEFAULT_CHECK_INTERVAL_SEC,
                 port=port or None,
                 retries=retries if retries not in (None, "") else None,
                 timeout_sec=timeout if timeout not in (None, "") else None,
@@ -1348,10 +1917,17 @@ def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
         # checked several ways -- each already gets its own status/incidents/
         # timeline for free. They share a group_key so the grid renders them
         # as one card.
-        paths = _parse_paths(paths_text)
+        paths = _merge_paths(discovered_checked, paths_text)
         entries = _build_entries(name, types, paths)
         group_key = secrets.token_hex(8) if len(entries) > 1 else None
         explicit_interval = interval if interval not in (None, "") else None
+        # One icon lookup for the whole submission -- every entry shares the
+        # same host, so N page monitors must not mean N homepage fetches.
+        # Failure is non-fatal: the card falls back to its letter badge.
+        try:
+            site_favicon = page_discovery.discover_favicon(url) if url else None
+        except Exception:
+            site_favicon = None
         for entry in entries:
             target_url = _target_for_type(_url_with_path(url, entry["path"]), entry["type"])
             data.add_target(entry["name"], target_url, entry["type"], keyword=keyword, port=port or None,
@@ -1360,7 +1936,8 @@ def add_edit_monitor(_open, _close, _cancel, _backdrop, _submit, _edit_open,
                              timeout_sec=timeout if timeout not in (None, "") else None,
                              http_method=method or "GET", http_body=body or None,
                              http_body_encoding=encoding or "json", group_key=group_key,
-                             notify=notify_enabled, subrow_label=entry["subrow_label"])
+                             notify=notify_enabled, subrow_label=entry["subrow_label"],
+                             favicon_url=site_favicon)
         out.update(wrapper_class="modal-wrapper addmonitor-hidden",
                    summary=build_summary_or_banner(), grid=build_target_grid(filter_text))
         return result()
@@ -1460,4 +2037,16 @@ if __name__ == "__main__":
     debug = "--debug" in sys.argv
     app.server.secret_key = _load_or_create_secret_key()  # persist across real restarts (L1)
     monitor_engine.start_background_scheduler(debug=debug)
-    app.run(debug=debug, port=8050)
+    # Resolve site icons for any monitor that doesn't have one yet. Daemon
+    # thread so it never delays startup or blocks shutdown; cards render
+    # letter badges until it finishes, then pick up icons on the next tick.
+    threading.Thread(target=data.backfill_favicons, daemon=True).start()
+    if debug:
+        # Dash's own dev server -- hot reload + the Dash debug UI. Flask's
+        # dev server underneath prints its own "do not use in production"
+        # warning on every start, which is correct: it's single-threaded and
+        # not what should be facing the public ngrok tunnel.
+        app.run(debug=True, port=8050)
+    else:
+        from waitress import serve
+        serve(app.server, host="0.0.0.0", port=8050, threads=8)

@@ -70,4 +70,20 @@ document.addEventListener('DOMContentLoaded', function () {
 
     setupModal('detail-wrapper', 'detail-open', '.detail-panel', 'detail-close');
     setupModal('add-monitor-wrapper', 'addmonitor-open', '.add-monitor-modal', 'add-monitor-close');
+
+    // A grouped card's site link lives inside its <summary>, and clicking
+    // anywhere in a <summary> is what toggles the parent <details>. That
+    // toggle is the browser's DEFAULT ACTION, not a bubbling handler, so it
+    // has to be preventDefault()ed -- stopPropagation alone would not stop
+    // it. The anchor's own navigation is untouched.
+    // Delegated on document (capture phase) because Dash re-renders the grid
+    // on every refresh tick, so listeners bound to the anchors themselves
+    // would be discarded seconds later.
+    document.addEventListener('click', function (e) {
+        var link = e.target.closest && e.target.closest('a.target-card-link');
+        if (link && link.closest('summary')) {
+            e.preventDefault();
+            window.open(link.href, '_blank', 'noopener,noreferrer');
+        }
+    }, true);
 });
