@@ -7,11 +7,18 @@ threads — simplest way to stay correct across the scheduler's background
 thread and Dash's request thread without a shared lock.
 """
 import contextlib
+import os
 import secrets
 import sqlite3
 import time
 
-DB_PATH = "rovix.db"
+# ROVIX_DB_PATH lets a deployment point this at a mounted volume (e.g. the
+# Docker setup, whose named volume is a DIRECTORY -- mounting it straight
+# onto the file "rovix.db" makes Docker create an empty directory there
+# instead, which SQLite can't open). Unset in every other deployment
+# (Windows dev, the systemd unit), so this is a no-op there -- same
+# "rovix.db" in the working directory as before.
+DB_PATH = os.environ.get("ROVIX_DB_PATH", "rovix.db")
 
 # Single source of truth for the default check interval -- app.py's Add
 # Monitor modal and api.py's REST create-monitor endpoint both fall back to

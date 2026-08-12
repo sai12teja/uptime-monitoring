@@ -36,21 +36,24 @@ services:
 
     # VOLUMES: the fix for "containers are disposable by default". Without
     # these, rovix.db (every monitor, incident, and user account) and the
-    # session key would reset to empty on every rebuild. Format is
-    # "VPS_PATH:CONTAINER_PATH" -- the left side is a real folder/file on the
-    # VPS's own disk, the right side is where the app looks for it inside
-    # the container.
+    # session key would reset to empty on every rebuild.
     #
-    # db.py's DB_PATH ("rovix.db") and app.py's SESSION_KEY_PATH
-    # (".session_secret.key") are plain relative filenames, resolved against
-    # /app (the WORKDIR set in the Dockerfile) -- so each is mounted as its
-    # own file, landing exactly where the unmodified app already looks. No
-    # container-specific path logic needed anywhere in the app; the same
-    # code runs unchanged on Windows dev, the systemd deployment, and here.
+    # Named volumes are DIRECTORIES, not files -- mounting one straight onto
+    # a filename (e.g. /app/rovix.db) makes Docker create an empty directory
+    # there instead, which SQLite can't open ("unable to open database
+    # file", hit on first real deploy). Fixed by mounting each volume onto
+    # its own directory, then pointing the app at a file inside it via
+    # ROVIX_DB_PATH / ROVIX_SESSION_KEY_PATH (db.py / app.py both fall back
+    # to their original relative-path defaults when these are unset, so
+    # Windows dev and the systemd deployment are unaffected).
     volumes:
-      - rovix-db:/app/rovix.db                      # every monitor/incident/user
-      - rovix-session-key:/app/.session_secret.key   # login sessions survive a rebuild
-      - rovix-logos:/app/assets/logos                # uploaded client logos
+      - rovix-db:/app/data           # every monitor/incident/user
+      - rovix-session-key:/app/key   # login sessions survive a rebuild
+      - rovix-logos:/app/assets/logos  # uploaded client logos
+
+    environment:
+      - ROVIX_DB_PATH=/app/data/rovix.db
+      - ROVIX_SESSION_KEY_PATH=/app/key/.session_secret.key
 
 volumes:
   rovix-db:

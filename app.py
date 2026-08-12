@@ -1406,7 +1406,10 @@ def serve_layout():
     )
 
 
-SESSION_KEY_PATH = ".session_secret.key"
+# ROVIX_SESSION_KEY_PATH: same reasoning as db.py's ROVIX_DB_PATH -- lets a
+# deployment point this at a mounted volume directory. Unset everywhere
+# except the Docker Compose setup, so this is a no-op elsewhere.
+SESSION_KEY_PATH = os.environ.get("ROVIX_SESSION_KEY_PATH", ".session_secret.key")
 
 
 def _load_or_create_secret_key():
