@@ -30,14 +30,16 @@ COPY . .
 # compose files explicitly publish.
 EXPOSE 8050
 
-# The actual startup command. Runs app.py exactly like the __main__ block
-# does today on Windows/waitress -- except sys.platform inside this
-# container is "linux", so requirements.txt's platform marker means
-# gunicorn is what actually got installed, not waitress. gunicorn is
-# started directly here rather than via app.py's own __main__, matching
-# how the systemd version of this deployment (DEPLOY_HOSTINGER.md) already
-# runs it -- one process, one worker (see that doc for why: the login
-# rate-limiter and the background check scheduler are both in-memory
-# per-process state, so a second worker would double-check every site and
-# silently halve the brute-force lockout protection).
-CMD ["gunicorn", "--workers", "1", "--threads", "4", "--bind", "0.0.0.0:8050", "--timeout", "60", "app:server"]
+# The actual startup command. Points at wsgi.py, NOT app:server directly --
+# gunicorn importing app.py as a plain module skips its `if __name__ ==
+# "__main__":` block entirely (__name__ is "app" when imported, never
+# "__main__"), which is where the session secret key, the background check
+# scheduler, and the favicon backfill thread all get started. wsgi.py
+# replicates exactly that setup, then exposes `server` for gunicorn.
+#
+# One worker, matching the systemd version of this deployment
+# (DEPLOY_HOSTINGER.md) -- the login rate-limiter and the background check
+# scheduler are both in-memory per-process state, so a second worker would
+# double-check every site and silently halve the brute-force lockout
+# protection.
+CMD ["gunicorn", "--workers", "1", "--threads", "4", "--bind", "0.0.0.0:8050", "--timeout", "60", "wsgi:server"]
