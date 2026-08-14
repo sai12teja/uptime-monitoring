@@ -608,10 +608,18 @@ def send(subject, body, html_body=None):
         if html_body:
             msg.add_alternative(html_body, subtype="html")
 
-        with smtplib.SMTP(host, int(os.environ.get("SMTP_PORT", "587")), timeout=10) as server:
+        # Port 465 is implicit TLS (SSL from the first byte); 587 is plain
+        # then STARTTLS. Connecting the wrong way doesn't fail cleanly -- a
+        # plain SMTP() to 465 just hangs until timeout. Default stays 587 +
+        # STARTTLS so nothing existing changes.
+        port = int(os.environ.get("SMTP_PORT", "587"))
+        ssl_mode = os.environ.get("SMTP_SSL", "").lower() in ("1", "true", "yes", "ssl") or port == 465
+        opener = smtplib.SMTP_SSL if ssl_mode else smtplib.SMTP
+        with opener(host, port, timeout=10) as server:
             user = os.environ.get("SMTP_USER")
             if user:
-                server.starttls()
+                if not ssl_mode:
+                    server.starttls()
                 server.login(user, os.environ.get("SMTP_PASS", ""))
             server.send_message(msg)
         return True
