@@ -16,6 +16,11 @@ FROM python:3.12-slim
 # VPS itself. Containers have their own private filesystem.
 WORKDIR /app
 
+# python:*-slim ships no timezone database, so TZ=Asia/Kolkata in
+# docker-compose.yml would be silently ignored and alert emails would keep
+# printing UTC. ~3MB, and it sits above the code COPY so it stays cached.
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/*
+
 # Copy just the dependency list first (see caching note above).
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

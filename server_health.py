@@ -169,7 +169,11 @@ def evaluate_metric_zone(status, pending_zone, pending_count, zone, threshold=2)
     return zone, None, 0, "deescalate"
 
 
-_cache = {"ts": 0.0, "value": None}
+# "ts" is time.monotonic() -- correct for measuring the TTL below, but NOT a
+# wall-clock time (on Linux it counts from boot). "wall" carries the real
+# time.time() of the same reading, for anything that DISPLAYS the timestamp:
+# formatting a monotonic value as a date renders it as 1970 + system uptime.
+_cache = {"ts": 0.0, "wall": 0.0, "value": None}
 
 
 def read_all():
@@ -190,7 +194,7 @@ def read_all():
         "inodes_pct": inodes_used_pct(),
         "services": service_states(),
     }
-    _cache.update(ts=now, value=value)
+    _cache.update(ts=now, wall=time.time(), value=value)
     return value
 
 
@@ -208,6 +212,7 @@ def check_server_metrics():
     """
     metrics = read_all()
     read_ts = _cache["ts"]
+    read_wall = _cache["wall"]  # same reading, wall-clock -- for the emails only
 
     for key, (warn_at, crit_at) in THRESHOLDS.items():
         state = db.get_metric_state(key)
@@ -232,7 +237,7 @@ def check_server_metrics():
                 incident_id = db.open_server_incident("Server", detail, new_status)
             else:
                 db.update_incident_severity(incident_id, new_status)
-            subject, body, html_body = email_alerts.format_server_alert(detail, new_status, ts=read_ts)
+            subject, body, html_body = email_alerts.format_server_alert(detail, new_status, ts=read_wall)
             email_alerts.send(subject, body, html_body)
             db.record_incident_event(incident_id, time.time(), "email_sent", subject)
         elif transition == "deescalate":
@@ -241,7 +246,7 @@ def check_server_metrics():
             downtime_sec = db.resolve_server_incident(incident_id)
             subject, body, html_body = email_alerts.format_recovered(f"Server ({label})",
                                                                        db.format_duration(downtime_sec),
-                                                                       ts=read_ts)
+                                                                       ts=read_wall)
             email_alerts.send(subject, body, html_body)
             db.record_incident_event(incident_id, time.time(), "email_sent", subject)
             incident_id = None

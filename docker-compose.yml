@@ -52,6 +52,9 @@ services:
       - rovix-logos:/app/assets/logos  # uploaded client logos
 
     environment:
+      # Alert emails print local time (email_alerts._fmt_ts). A container
+      # defaults to UTC, so without this every alert reads 5:30 behind IST.
+      - TZ=Asia/Kolkata
       - ROVIX_DB_PATH=/app/data/rovix.db
       - ROVIX_SESSION_KEY_PATH=/app/key/.session_secret.key
 
