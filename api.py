@@ -14,6 +14,7 @@ from flask import Blueprint, jsonify, request
 
 import data
 import db
+import whm_security
 
 bp = Blueprint("api", __name__)
 
@@ -30,8 +31,8 @@ def _require_api_key():
         return jsonify({"error": "unauthorized"}), 401
 
 
-def _monitor_dict(row):
-    return {
+def _monitor_dict(row, include_token=False):
+    d = {
         "id": row["id"],
         "name": row["name"],
         "url": row["url"],
@@ -39,18 +40,24 @@ def _monitor_dict(row):
         "keyword": row["keyword"],
         "interval_sec": row["interval_sec"],
         "port": row["port"],
-        "push_token": row["push_token"],
         "retries": row["retries"],
         "timeout_sec": row["timeout_sec"],
         "http_method": row["http_method"],
         "http_body": row["http_body"],
         "http_body_encoding": row["http_body_encoding"],
+        "expected_status": row["expected_status"],
         "status": row["status"],
         "active": bool(row["active"]),
         "last_checked_at": row["last_checked_at"],
         "last_response_ms": row["last_response_ms"],
         "created_at": row["created_at"],
     }
+    # A push_token is a bearer secret -- anyone holding it can forge check-ins.
+    # Return it only on the single-resource response for the monitor you just
+    # created/edited, never in the bulk list (which would dump every secret).
+    if include_token:
+        d["push_token"] = row["push_token"]
+    return d
 
 
 def _valid_url(url, target_type):
@@ -61,10 +68,60 @@ def _valid_url(url, target_type):
     return True
 
 
+_VALID_TYPES = {"website", "crm", "tcp", "dns", "push"}
+_VALID_HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+_MIN_INTERVAL_SEC = 30    # interval_sec: 1 would hammer the target every tick
+_MAX_TIMEOUT_SEC = 120
+
+
+def _coerce_int(value, name, minimum=None, maximum=None, allow_none=False):
+    """Return (int|None, error). Rejects bools, floats and strings -- a string
+    interval_sec would otherwise be stored and silently stop the monitor from
+    ever running."""
+    if value is None:
+        return None, (None if allow_none else f"{name} is required")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None, f"{name} must be an integer"
+    if minimum is not None and value < minimum:
+        return None, f"{name} must be >= {minimum}"
+    if maximum is not None and value > maximum:
+        return None, f"{name} must be <= {maximum}"
+    return value, None
+
+
+def _validate_monitor(target_type, interval_sec, port, retries, timeout_sec, http_method,
+                      expected_status=None):
+    """Validate/coerce the enum + numeric fields shared by create and edit.
+    Returns (fields_dict, error). Input is untrusted JSON straight off the
+    wire, so a bad type/method or a string number must 400, not reach db."""
+    if target_type not in _VALID_TYPES:
+        return None, f"type must be one of {sorted(_VALID_TYPES)}"
+    method = (http_method or "GET").upper()
+    if method not in _VALID_HTTP_METHODS:
+        return None, f"http_method must be one of {sorted(_VALID_HTTP_METHODS)}"
+    interval_sec, err = _coerce_int(interval_sec, "interval_sec", minimum=_MIN_INTERVAL_SEC)
+    if err:
+        return None, err
+    port, err = _coerce_int(port, "port", minimum=1, maximum=65535, allow_none=True)
+    if err:
+        return None, err
+    retries, err = _coerce_int(retries, "retries", minimum=0, maximum=10, allow_none=True)
+    if err:
+        return None, err
+    timeout_sec, err = _coerce_int(timeout_sec, "timeout_sec", minimum=1, maximum=_MAX_TIMEOUT_SEC, allow_none=True)
+    if err:
+        return None, err
+    expected_status, err = _coerce_int(expected_status, "expected_status", minimum=100, maximum=599, allow_none=True)
+    if err:
+        return None, err
+    return {"interval_sec": interval_sec, "port": port, "retries": retries,
+            "timeout_sec": timeout_sec, "http_method": method, "expected_status": expected_status}, None
+
+
 def register_api(server):
     @bp.route("/monitors", methods=["GET"])
     def api_list_monitors():
-        return jsonify([_monitor_dict(m) for m in db.list_monitors()])
+        return jsonify([_monitor_dict(m) for m in db.list_monitors()])  # no push_token in the bulk list
 
     @bp.route("/monitors", methods=["POST"])
     def api_create_monitor():
@@ -80,6 +137,7 @@ def register_api(server):
         http_method = body.get("http_method") or "GET"
         http_body = body.get("http_body")
         http_body_encoding = body.get("http_body_encoding") or "json"
+        expected_status = body.get("expected_status")
         if not name:
             return jsonify({"error": "name is required"}), 400
         if target_type != "push" and not url:
@@ -88,11 +146,17 @@ def register_api(server):
             return jsonify({"error": "url must start with http:// or https://"}), 400
         if target_type == "tcp" and not port:
             return jsonify({"error": "port is required for tcp monitors"}), 400
-        monitor_id = db.add_monitor(name, url, target_type, keyword=keyword, interval_sec=interval_sec,
-                                     port=port, retries=retries, timeout_sec=timeout_sec,
-                                     http_method=http_method, http_body=http_body,
-                                     http_body_encoding=http_body_encoding)
-        return jsonify(_monitor_dict(db.get_monitor(monitor_id))), 201
+        fields, err = _validate_monitor(target_type, interval_sec, port, retries, timeout_sec,
+                                        http_method, expected_status)
+        if err:
+            return jsonify({"error": err}), 400
+        monitor_id = db.add_monitor(name, url, target_type, keyword=keyword,
+                                     interval_sec=fields["interval_sec"], port=fields["port"],
+                                     retries=fields["retries"], timeout_sec=fields["timeout_sec"],
+                                     http_method=fields["http_method"], http_body=http_body,
+                                     http_body_encoding=http_body_encoding,
+                                     expected_status=fields["expected_status"])
+        return jsonify(_monitor_dict(db.get_monitor(monitor_id), include_token=True)), 201
 
     @bp.route("/monitors/<int:monitor_id>", methods=["PUT"])
     def api_edit_monitor(monitor_id):
@@ -112,6 +176,7 @@ def register_api(server):
         http_method = body.get("http_method", row["http_method"]) or "GET"
         http_body = body.get("http_body", row["http_body"])
         http_body_encoding = body.get("http_body_encoding", row["http_body_encoding"]) or "json"
+        expected_status = body.get("expected_status", row["expected_status"])
         if not name:
             return jsonify({"error": "name is required"}), 400
         if row["type"] != "push" and not url:
@@ -120,10 +185,16 @@ def register_api(server):
             return jsonify({"error": "url must start with http:// or https://"}), 400
         if row["type"] == "tcp" and not port:
             return jsonify({"error": "port is required for tcp monitors"}), 400
-        data.update_target(monitor_id, name, url, keyword, interval_sec, port=port,
-                            retries=retries, timeout_sec=timeout_sec, http_method=http_method,
-                            http_body=http_body, http_body_encoding=http_body_encoding)
-        return jsonify(_monitor_dict(db.get_monitor(monitor_id)))
+        fields, err = _validate_monitor(row["type"], interval_sec, port, retries, timeout_sec,
+                                        http_method, expected_status)
+        if err:
+            return jsonify({"error": err}), 400
+        data.update_target(monitor_id, name, url, keyword, fields["interval_sec"], port=fields["port"],
+                            retries=fields["retries"], timeout_sec=fields["timeout_sec"],
+                            http_method=fields["http_method"], http_body=http_body,
+                            http_body_encoding=http_body_encoding,
+                            expected_status=fields["expected_status"])
+        return jsonify(_monitor_dict(db.get_monitor(monitor_id), include_token=True))
 
     @bp.route("/monitors/<int:monitor_id>", methods=["DELETE"])
     def api_delete_monitor(monitor_id):
@@ -175,5 +246,18 @@ def register_api(server):
     @bp.route("/server/metrics", methods=["GET"])
     def api_server_metrics():
         return jsonify(data.get_server_metrics())
+
+    @bp.route("/whm-security", methods=["POST"])
+    def api_whm_security():
+        # Push path: a root-owned agent on the WHM box POSTs its own security
+        # counts (Imunify360 malware / cPHulk / ModSecurity), so Rovix alerts
+        # on them without ever holding WHM credentials. Same API-key gate as the
+        # rest of this blueprint.
+        body = request.get_json(silent=True) or {}
+        host = (body.get("host") or "").strip()
+        accepted, err = whm_security.ingest_push(host, body.get("counts"))
+        if err:
+            return jsonify({"error": err}), 400
+        return jsonify({"host": host, "accepted": accepted}), 200
 
     server.register_blueprint(bp)
