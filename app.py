@@ -136,6 +136,7 @@ def build_topbar(active_page="monitors"):
                 className="header-actions",
                 children=[
                     html.Span(f"updated {datetime.now().strftime('%H:%M:%S')}", className="updated-at"),
+                    _theme_toggle_button(),
                     html.Button("⚙", id="settings-open", className="ack-btn settings-gear",
                                 n_clicks=0, title="Notification settings"),
                     html.A("Logout", href="/logout", className="logout-link"),
@@ -157,6 +158,7 @@ def build_skeleton_topbar():
             html.Div(
                 className="header-actions",
                 children=[
+                    _theme_toggle_button(),
                     html.Button("⚙", id="settings-open", className="ack-btn settings-gear",
                                 n_clicks=0, title="Notification settings"),
                     html.A("Logout", href="/logout", className="logout-link"),
@@ -164,6 +166,66 @@ def build_skeleton_topbar():
             ),
         ],
     )
+
+
+def _theme_toggle_button():
+    """Sun/moon toggle. Which glyph shows is pure CSS keyed off <html>'s
+    data-theme, so it never flashes the wrong icon; the click handler is a
+    clientside callback (see below) that flips the attribute + persists it."""
+    return html.Button(
+        [
+            html.Span("☀", className="theme-icon theme-icon-light"),
+            html.Span("☾", className="theme-icon theme-icon-dark"),
+        ],
+        id="theme-toggle",
+        className="ack-btn theme-toggle",
+        n_clicks=0,
+        title="Toggle light / dark theme",
+    )
+
+
+def _build_status_hero(sites, counts, incident_count, window_label, avg_mttr, server_status):
+    """Persistent operational-state lead-in (Better Stack / OpenAI pattern):
+    one plain-language status line + a few supporting stats, all from real
+    data. Replaces the old conditional 'all-clear' hero so the page always
+    opens with 'how is everything right now'."""
+    total = sites["total"]
+    checks = f"{counts['up']}/{counts['total']} checks passing"
+    if total == 0:
+        state, title = "warn", "No monitors yet"
+        sub = "Add your first monitor to start tracking uptime."
+    elif sites["down"] > 0:
+        n = sites["down"]
+        state, title = "crit", f"{n} site{'s' if n != 1 else ''} down"
+        sub = f"{sites['up']} of {total} sites up · {checks}"
+    elif sites["degraded"] > 0:
+        n = sites["degraded"]
+        state, title = "warn", f"{n} site{'s' if n != 1 else ''} degraded"
+        sub = f"{sites['up']} of {total} sites up · {checks}"
+    else:
+        state, title = "ok", "All systems operational"
+        sub = f"All {total} site{'s' if total != 1 else ''} up · {checks}"
+
+    def hero_stat(value, label):
+        return html.Div(className="hero-stat", children=[
+            html.Div(str(value), className="hero-stat-value"),
+            html.Div(label, className="hero-stat-label"),
+        ])
+
+    return html.Div(className=f"status-hero hero-{state}", children=[
+        html.Div(className="status-hero-main", children=[
+            html.Span(className=f"status-hero-dot hero-dot-{state}"),
+            html.Div([
+                html.Div(title, className="status-hero-title"),
+                html.Div(sub, className="status-hero-sub"),
+            ]),
+        ]),
+        html.Div(className="status-hero-stats", children=[
+            hero_stat(incident_count, f"Incidents · {window_label}"),
+            hero_stat(_format_mttr(avg_mttr), "Avg fix time"),
+            hero_stat(server_status, "This server"),
+        ]),
+    ])
 
 
 def build_summary_or_banner(window_hours=24):
@@ -244,20 +306,15 @@ def build_summary_or_banner(window_hours=24):
         children=[html.Div("Monitors by Type", className="summary-stat-title")] + type_rows,
     )
 
-    children = [html.Div(className="summary-stat-row-outer",
-                          children=[status_card, incidents_card, type_card])]
+    window_label = next((lbl for lbl, hrs in INCIDENT_WINDOWS if hrs == window_hours),
+                        f"{window_hours}h")
+    hero = _build_status_hero(sites, counts, incident_count, window_label, avg_mttr, server_status)
 
-    if counts["total"] > 0 and counts["down"] == 0:
-        # The real-data equivalent of a "No Issues Found" hero -- shown only
-        # when there's something to celebrate, not decoration on every load.
-        children.append(html.Div(
-            className="all-clear-hero",
-            children=[
-                html.Div("✓", className="all-clear-icon"),
-                html.Div("All Systems Operational", className="all-clear-title"),
-                html.Div(f"All {counts['total']} monitored targets are up.", className="all-clear-desc"),
-            ],
-        ))
+    children = [
+        hero,
+        html.Div(className="summary-stat-row-outer",
+                 children=[status_card, incidents_card, type_card]),
+    ]
 
     bar = html.Div(className="summary-bar calm", children=children)
 
@@ -959,12 +1016,30 @@ def build_sidebar(active_page="monitors"):
     return html.Div(
         className="sidebar",
         children=[
-            html.Div("Rovix Uptime Monitoring", className="sidebar-brand"),
+            html.Div(
+                className="sidebar-brand",
+                children=[
+                    html.Div("R", className="sidebar-logo"),
+                    html.Div(
+                        className="sidebar-brand-text",
+                        children=[
+                            html.Span("Rovix", className="sidebar-brand-name"),
+                            html.Span("Uptime Monitoring", className="sidebar-brand-sub"),
+                        ],
+                    ),
+                ],
+            ),
             html.Div(
                 className="sidebar-nav",
                 children=[
-                    html.Button(label, id=f"nav-{page}", n_clicks=0,
-                                className=_nav_item_class(active_page, page))
+                    html.Button(
+                        [
+                            html.Span(className=f"nav-icon nav-icon-{page}"),
+                            html.Span(label, className="nav-label"),
+                        ],
+                        id=f"nav-{page}", n_clicks=0,
+                        className=_nav_item_class(active_page, page),
+                    )
                     for page, label in nav_items
                 ],
             ),
@@ -987,6 +1062,9 @@ def serve_layout():
                     dcc.Store(id="editing-monitor-id"),
                     dcc.Store(id="incident-window-store", data=24),
                     dcc.Store(id="active-page-store", data="monitors"),
+                    # Sink for the clientside theme toggle (the real state lives
+                    # on <html data-theme> + localStorage, not here).
+                    dcc.Store(id="theme-store"),
                     # session storage — survives a page reload so a status change
                     # picked up on the next tick is still diffed against the last
                     # known baseline, not reset to "everything just changed."
@@ -1438,16 +1516,74 @@ def _load_or_create_secret_key():
 
 app = Dash(__name__, title="Rovix Uptime Monitoring", suppress_callback_exceptions=True)
 app.layout = serve_layout
+
+# Apply the saved theme on <html> BEFORE first paint (no light/dark flash).
+# Default dark when unset — dark is the product default (night incident checks).
+app.index_string = """<!DOCTYPE html>
+<html>
+<head>
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('rovix-theme');
+    document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+  } catch (e) {
+    document.documentElement.setAttribute('data-theme', 'dark');
+  }
+})();
+</script>
+{%metas%}
+<title>{%title%}</title>
+{%favicon%}
+{%css%}
+</head>
+<body>
+{%app_entry%}
+<footer>
+{%config%}
+{%scripts%}
+{%renderer%}
+</footer>
+</body>
+</html>"""
 # Ephemeral here (matches pre-L1-fix behavior) -- merely importing this
 # module (every UI test file does) must not touch disk. The real running
 # server overrides this with the persisted key in the __main__ block below.
 app.server.secret_key = os.environ.get("SESSION_SECRET_KEY") or secrets.token_hex(32)
+# Session-cookie hardening. SameSite=Lax blocks the session cookie from riding
+# a cross-site POST, which is the CSRF vector against the /login and /password
+# forms. Secure defaults OFF so plain-HTTP dev (and the current :5000 deploy
+# with no TLS yet) still works; set SESSION_COOKIE_SECURE=1 once behind HTTPS.
+app.server.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "").lower() in ("1", "true", "yes"),
+)
 auth.register_auth(app.server)  # PRD §16 gap 6 — session-login gate for the whole dashboard
 api.register_api(app.server)  # PRD §11 — same process/port as the dashboard
 push.register_push(app.server)  # push/passive monitor check-in endpoint
 
 
 # ---------- Callbacks ----------
+
+# Theme toggle — pure clientside: flip <html data-theme> and persist to
+# localStorage. No server round-trip; the Store output is just a required sink.
+app.clientside_callback(
+    """
+    function (n_clicks) {
+        if (!n_clicks) { return window.dash_clientside.no_update; }
+        var el = document.documentElement;
+        var next = el.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+        el.setAttribute('data-theme', next);
+        try { localStorage.setItem('rovix-theme', next); } catch (e) {}
+        return next;
+    }
+    """,
+    Output("theme-store", "data"),
+    Input("theme-toggle", "n_clicks"),
+    prevent_initial_call=True,
+)
+
 
 @app.callback(
     Output("topbar-slot", "children"),
