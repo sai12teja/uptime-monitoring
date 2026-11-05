@@ -238,8 +238,7 @@ def check_server_metrics():
             else:
                 db.update_incident_severity(incident_id, new_status)
             subject, body, html_body = email_alerts.format_server_alert(detail, new_status, ts=read_wall)
-            email_alerts.send(subject, body, html_body)
-            db.record_incident_event(incident_id, time.time(), "email_sent", subject)
+            email_alerts.send_and_record(incident_id, subject, body, html_body)
         elif transition == "deescalate":
             db.update_incident_severity(incident_id, new_status)
         elif transition == "resolve":
@@ -247,8 +246,7 @@ def check_server_metrics():
             subject, body, html_body = email_alerts.format_recovered(f"Server ({label})",
                                                                        db.format_duration(downtime_sec),
                                                                        ts=read_wall)
-            email_alerts.send(subject, body, html_body)
-            db.record_incident_event(incident_id, time.time(), "email_sent", subject)
+            email_alerts.send_and_record(incident_id, subject, body, html_body)
             incident_id = None
 
         db.set_metric_state(key, new_status, new_pending_zone, new_pending_count, incident_id, read_ts)

@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS monitors (
     group_key TEXT,
     notify INTEGER NOT NULL DEFAULT 1,
     subrow_label TEXT,
-    favicon_url TEXT
+    favicon_url TEXT,
+    expected_status INTEGER
 );
 CREATE TABLE IF NOT EXISTS checks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -100,6 +101,15 @@ CREATE TABLE IF NOT EXISTS settings (
     email_3 TEXT,
     notify_enabled INTEGER NOT NULL DEFAULT 1
 );
+CREATE TABLE IF NOT EXISTS pending_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    item_json TEXT NOT NULL,
+    batch_started_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_checks_monitor_ts ON checks(monitor_id, ts);
+CREATE INDEX IF NOT EXISTS idx_incidents_monitor_type ON incidents(monitor_id, problem_type);
+CREATE INDEX IF NOT EXISTS idx_incidents_resolved ON incidents(resolved);
 """
 
 
@@ -129,6 +139,12 @@ def _conn():
     # makes the file undeletable. Call sites are unchanged.
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    # WAL: readers (the dashboard) don't block the scheduler's writes, which now
+    # run concurrently. foreign_keys: actually enforce the REFERENCES in SCHEMA
+    # (off by default in SQLite). Both are per-connection and must be set
+    # outside a transaction, so they go here before the `with conn:` block.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
     try:
         with conn:
             yield conn
@@ -160,6 +176,7 @@ def init_db():
         _add_column_if_missing(conn, "monitors", "notify", "INTEGER NOT NULL DEFAULT 1")
         _add_column_if_missing(conn, "monitors", "subrow_label", "TEXT")
         _add_column_if_missing(conn, "monitors", "favicon_url", "TEXT")
+        _add_column_if_missing(conn, "monitors", "expected_status", "INTEGER")
 
 
 def list_monitors():
@@ -185,14 +202,15 @@ def get_due_monitors(now):
 
 def update_monitor(monitor_id, name, url, keyword, interval_sec, port=None,
                     retries=None, timeout_sec=None, http_method="GET",
-                    http_body=None, http_body_encoding="json", notify=True):
+                    http_body=None, http_body_encoding="json", notify=True, expected_status=None):
     with _conn() as conn:
         conn.execute(
             "UPDATE monitors SET name = ?, url = ?, keyword = ?, interval_sec = ?, port = ?, "
             "retries = ?, timeout_sec = ?, http_method = ?, http_body = ?, http_body_encoding = ?, "
-            "notify = ? WHERE id = ?",
+            "notify = ?, expected_status = ? WHERE id = ?",
             (name, url, keyword, interval_sec, port,
-             retries, timeout_sec, http_method, http_body, http_body_encoding, int(notify), monitor_id),
+             retries, timeout_sec, http_method, http_body, http_body_encoding, int(notify),
+             expected_status, monitor_id),
         )
 
 
@@ -204,7 +222,7 @@ def deactivate_monitor(monitor_id):
 def add_monitor(name, url, target_type, keyword=None, interval_sec=DEFAULT_CHECK_INTERVAL_SEC, port=None,
                  retries=None, timeout_sec=None, http_method="GET",
                  http_body=None, http_body_encoding="json", group_key=None, notify=True,
-                 subrow_label=None, favicon_url=None):
+                 subrow_label=None, favicon_url=None, expected_status=None):
     # Push monitors are pinged via a secret-token URL rather than actively
     # checked -- the token is always server-generated, never client-supplied.
     push_token = secrets.token_hex(16) if target_type == "push" else None
@@ -212,11 +230,11 @@ def add_monitor(name, url, target_type, keyword=None, interval_sec=DEFAULT_CHECK
         cur = conn.execute(
             "INSERT INTO monitors (name, url, type, keyword, interval_sec, created_at, port, push_token, "
             "retries, timeout_sec, http_method, http_body, http_body_encoding, group_key, notify, "
-            "subrow_label, favicon_url) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "subrow_label, favicon_url, expected_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (name, url, target_type, keyword, interval_sec, time.time(), port, push_token,
              retries, timeout_sec, http_method, http_body, http_body_encoding, group_key, int(notify),
-             subrow_label, favicon_url),
+             subrow_label, favicon_url, expected_status),
         )
         return cur.lastrowid
 
@@ -237,8 +255,12 @@ def monitors_missing_favicon():
 
 
 def get_monitor_by_push_token(push_token):
+    # active = 1: a deleted (soft-deleted) push monitor must stop accepting
+    # check-ins, or its token keeps a resolved monitor alive (item 9).
     with _conn() as conn:
-        return conn.execute("SELECT * FROM monitors WHERE push_token = ?", (push_token,)).fetchone()
+        return conn.execute(
+            "SELECT * FROM monitors WHERE push_token = ? AND active = 1", (push_token,)
+        ).fetchone()
 
 
 def record_check(monitor_id, ts, ok, response_ms, detail):
@@ -255,6 +277,19 @@ def list_checks(monitor_id, limit=10):
             "SELECT * FROM checks WHERE monitor_id = ? ORDER BY ts DESC LIMIT ?",
             (monitor_id, limit),
         ).fetchall()
+
+
+def uptime_since(monitor_id, since_ts):
+    """(total_checks, ok_checks) for a monitor since since_ts. The detail
+    view's 30-day uptime must span real time, not just the last N rows (it
+    used to be computed from the last 10 checks and mislabelled -- item 13)."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(ok), 0) AS ok "
+            "FROM checks WHERE monitor_id = ? AND ts >= ?",
+            (monitor_id, since_ts),
+        ).fetchone()
+        return row["total"], row["ok"]
 
 
 def update_monitor_state(monitor_id, status, fails, oks, checked_at, response_ms):
@@ -275,6 +310,15 @@ def _log_event(conn, incident_id, ts, event_type, detail=None):
 
 def open_incident(monitor_id, target_name, problem, severity="critical", problem_type="http"):
     with _conn() as conn:
+        # Idempotent per (monitor, problem_type): if one is already open, reuse
+        # it instead of opening a duplicate (review item 12 -- the DB itself now
+        # enforces "deduplicated by (target, problem type)", not just the caller).
+        existing = conn.execute(
+            "SELECT id FROM incidents WHERE monitor_id = ? AND problem_type = ? AND resolved IS NULL",
+            (monitor_id, problem_type),
+        ).fetchone()
+        if existing is not None:
+            return existing["id"]
         cur = conn.execute(
             "INSERT INTO incidents (monitor_id, target_name, problem, severity, problem_type, started) "
             "VALUES (?, ?, ?, ?, ?, ?)",
@@ -464,6 +508,27 @@ def get_open_incident(monitor_id, problem_type="http"):
             "SELECT * FROM incidents WHERE monitor_id = ? AND problem_type = ? AND resolved IS NULL",
             (monitor_id, problem_type),
         ).fetchone()
+
+
+def save_pending_alert(kind, item_json, batch_started_at):
+    """Persist one queued alert item so a restart doesn't lose the in-memory
+    batch (up to ALERT_BATCH_WINDOW_SEC of alerts). Cleared on a successful
+    flush (clear_pending_alerts)."""
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO pending_alerts (kind, item_json, batch_started_at) VALUES (?, ?, ?)",
+            (kind, item_json, batch_started_at),
+        )
+
+
+def list_pending_alerts():
+    with _conn() as conn:
+        return conn.execute("SELECT * FROM pending_alerts ORDER BY id").fetchall()
+
+
+def clear_pending_alerts(kind):
+    with _conn() as conn:
+        conn.execute("DELETE FROM pending_alerts WHERE kind = ?", (kind,))
 
 
 init_db()

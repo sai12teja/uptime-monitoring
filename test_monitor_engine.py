@@ -54,7 +54,9 @@ def _check(body, headers, keyword):
     monitor = {"url": "https://example.invalid", "keyword": keyword,
                "http_method": "GET", "http_body": None, "http_body_encoding": "json",
                "timeout_sec": None}
-    with patch("urllib.request.urlopen", return_value=_FakeResponse(body, headers)):
+    # do_http_check now goes through a redirect-guarding opener (SSRF fix), so
+    # mock that seam rather than urllib.request.urlopen directly.
+    with patch("monitor_engine._GUARDED_OPENER.open", return_value=_FakeResponse(body, headers)):
         return do_http_check(monitor)
 
 

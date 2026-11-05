@@ -15,7 +15,7 @@ WorkingDirectory=/var/www/rovixdashboard
 # worker would keep its own independent counter, so an attacker splitting
 # guesses across two workers gets 2x the real attempt budget before either
 # one locks out. monitor_engine's background scheduler is also started once
-# per process (app.py's __main__), so >1 worker would run the check loop
+# per process (wsgi.py, the entrypoint below), so >1 worker would run the check loop
 # multiple times, hitting every monitored site N-times-as-often and sending
 # duplicate alert emails per incident.
 ExecStart=/var/www/rovixdashboard/venv/bin/gunicorn \
@@ -23,7 +23,7 @@ ExecStart=/var/www/rovixdashboard/venv/bin/gunicorn \
     --threads 4 \
     --bind 127.0.0.1:8000 \
     --timeout 60 \
-    app:server
+    wsgi:server
 
 Restart=always
 RestartSec=5

@@ -51,3 +51,8 @@ vendor/
 Thumbs.db
 .vscode/
 .idea/
+
+# Office temp/lock files + binary source export
+~$*
+*.docx
+*.tmp

@@ -202,10 +202,11 @@ def backfill_favicons():
 
 def update_target(target_id, name, url, keyword, interval_sec, port=None,
                    retries=None, timeout_sec=None, http_method="GET",
-                   http_body=None, http_body_encoding="json", notify=True):
+                   http_body=None, http_body_encoding="json", notify=True, expected_status=None):
     db.update_monitor(target_id, name, url, keyword, interval_sec, port=port,
                        retries=retries, timeout_sec=timeout_sec, http_method=http_method,
-                       http_body=http_body, http_body_encoding=http_body_encoding, notify=notify)
+                       http_body=http_body, http_body_encoding=http_body_encoding, notify=notify,
+                       expected_status=expected_status)
 
 
 def delete_target(target_id):
@@ -228,9 +229,10 @@ def get_target_detail(target_id):
         for c in checks
     ]
 
-    total = len(checks)
-    ok_count = sum(1 for c in checks if c["ok"])
-    uptime = f"{ok_count / total * 100:.2f}%" if total else "—"
+    # 30-day uptime spans real time (the label says "30-day"), not the last 10
+    # rows the recent-activity timeline/table above use (item 13).
+    total_30d, ok_30d = db.uptime_since(target_id, now - 30 * 86400)
+    uptime = f"{ok_30d / total_30d * 100:.2f}%" if total_30d else "—"
     ok_ms = [c["response_ms"] for c in checks if c["ok"] and c["response_ms"] is not None]
     avg_ms = f"{sum(ok_ms) // len(ok_ms)}ms" if ok_ms else "—"
 

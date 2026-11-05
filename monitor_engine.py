@@ -5,7 +5,7 @@ machine (§10: 3 consecutive fails -> DOWN, 2 consecutive successes -> UP)
 Server health (CPU/RAM/disk) and correlated-outage detection are separate
 tasks — this module only owns website/CRM reachability.
 """
-import ipaddress
+import json
 import os
 import socket
 import threading
@@ -20,6 +20,10 @@ import db
 import email_alerts
 import server_health
 import ssl_check
+import ssrf_guard
+import whm_discovery
+import whm_health
+import whm_security
 
 CHECK_TIMEOUT_SEC = 10  # ponytail: flat timeout for every monitor, add a per-monitor
                          # column if some targets genuinely need a different budget
@@ -41,6 +45,16 @@ PURGE_INTERVAL_SEC = 24 * 3600  # once a day is plenty at a 90-day-scale window
 # 0 collapses to "flush immediately" (every existing single-event test
 # relies on this to keep working unchanged).
 ALERT_BATCH_WINDOW_SEC = int(os.environ.get("ALERT_BATCH_WINDOW_SEC", "60"))
+# A website/CRM/API that still responds 200 but slowly is a real degradation
+# (often the early warning before an outage). Alerts (warning severity) after 2
+# consecutive slow reads, resolves when it recovers. Configurable, defensive parse.
+LATENCY_WARN_MS = whm_health._int_env("LATENCY_WARN_MS", 3000)
+
+# Serializes all alert processing. push_ping (web thread) and the scheduler
+# thread both record check results and run handle_tick_events; without this
+# they race on _PENDING/_BATCH_STARTED_AT, the correlated-outage read-modify-
+# write, and a single monitor's counters (item 8).
+_ALERT_LOCK = threading.Lock()
 
 
 def compute_is_correlated_outage(monitor_statuses, min_monitors=MIN_MONITORS_FOR_CORRELATION):
@@ -62,48 +76,57 @@ def _encode_http_body(body, encoding):
     return body.encode(), "application/json"  # default: json
 
 
-def _is_blocked_host(hostname):
-    """SSRF/internal-recon guard (security review H2): a monitor is a
-    standing invitation to fetch/connect to whatever hostname a user
-    types, on a schedule, forever. Blocks link-local/RFC1918-private/
-    reserved targets by default -- cloud metadata endpoints
-    (169.254.169.254) and other hosts on the local network that the
-    monitoring server can reach but a monitor author normally shouldn't
-    be able to probe.
+# SSRF/internal-recon guard -- see ssrf_guard.is_blocked_host. Kept under this
+# name because do_http_check/do_tcp_check and the test suite reference it.
+# Checked at connect time, not creation: resolving fresh each tick is what
+# stops DNS rebinding across ticks.
+_is_blocked_host = ssrf_guard.is_blocked_host
 
-    Loopback (127.0.0.0/8, ::1) is deliberately exempt: monitoring a
-    service on the same box the scheduler runs on is a legitimate,
-    already-tested use case (this repo's own test suite spins up real
-    local HTTP/TCP servers on 127.0.0.1), and it isn't the network-pivot
-    risk the rest of this guard exists for -- code that can create a
-    monitor already runs in this same process.
 
-    Checked here at connect time, not at monitor creation -- resolving
-    fresh on every tick is what actually stops DNS rebinding (a hostname
-    that resolved to a public IP at creation time but a private one now).
-    Unresolvable hostnames return False so the real check reports the
-    DNS failure instead of a misleading "blocked" detail.
-    """
+class _SSRFBlockedError(urllib.error.URLError):
+    """Raised when an HTTP redirect points at a blocked internal address."""
+
+
+class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """urllib follows 3xx redirects automatically; without this a public URL
+    could redirect the checker to 169.254.169.254 or a 10.x host, defeating
+    the connect-time guard. Re-check every redirect target's host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        host = urllib.parse.urlparse(newurl).hostname
+        if host and _is_blocked_host(host):
+            raise _SSRFBlockedError("redirect to a private/internal address")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_GUARDED_OPENER = urllib.request.build_opener(_GuardedRedirectHandler())
+
+
+def _mget(monitor, key, default=None):
+    """Read a monitor column that may be absent on a hand-built test monitor
+    dict. A real db row always has every column; test dicts for do_http_check
+    don't carry the newer ones. sqlite3.Row raises IndexError for a missing
+    key, dict raises KeyError -- treat either, and a NULL value, as the default."""
     try:
-        addrs = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
-    except socket.gaierror:
-        return False
-    for addr in addrs:
-        try:
-            ip = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if ip.is_private and not ip.is_loopback:
-            return True
-    return False
+        val = monitor[key]
+    except (KeyError, IndexError):
+        return default
+    return default if val is None else val
 
 
 def do_http_check(monitor):
     """Returns (ok: bool, response_ms: int, detail: str)."""
     start = time.monotonic()
     hostname = urllib.parse.urlparse(monitor["url"]).hostname
-    if hostname and _is_blocked_host(hostname):
-        return False, 0, "Blocked: target resolves to a private/internal address"
+    if hostname:
+        try:
+            # Bounded resolve up front: blocks the SSRF targets AND warms the OS
+            # resolver cache, so urlopen's own (untimeoutable) getaddrinfo below
+            # can't hang the tick on a slow-DNS host.
+            if ssrf_guard.addrs_blocked(ssrf_guard.resolve(hostname)):
+                return False, 0, "Blocked: target resolves to a private/internal address"
+        except ssrf_guard.DNSTimeout:
+            return False, int((time.monotonic() - start) * 1000), f"DNS timeout after {ssrf_guard.DNS_TIMEOUT_SEC}s"
     timeout = monitor["timeout_sec"] or CHECK_TIMEOUT_SEC
     headers = {"User-Agent": "RovixMonitor/1.0"}
     method = monitor["http_method"] or "GET"
@@ -113,7 +136,7 @@ def do_http_check(monitor):
         headers["Content-Type"] = content_type
     req = urllib.request.Request(monitor["url"], data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _GUARDED_OPENER.open(req, timeout=timeout) as resp:
             body = resp.read(65536)
             response_ms = int((time.monotonic() - start) * 1000)
             keyword = monitor["keyword"]
@@ -129,11 +152,27 @@ def do_http_check(monitor):
                         return False, response_ms, f"HTTP {resp.status} but response was not readable"
                 if keyword.encode() not in body:
                     return False, response_ms, f"HTTP {resp.status} but expected content missing"
+            # Expected-status (API monitors): a specific code is the success
+            # condition. Lets an endpoint that correctly returns e.g. 401/403 be
+            # "up", and a normally-200 API be "down" the moment it returns 500.
+            expected = _mget(monitor, "expected_status")
+            if expected is not None:
+                if resp.status == expected:
+                    return True, response_ms, f"HTTP {resp.status}"
+                return False, response_ms, f"HTTP {resp.status}, expected {expected}"
             if resp.status >= 400:
                 return False, response_ms, f"HTTP {resp.status}"
             return True, response_ms, f"HTTP {resp.status}"
     except urllib.error.HTTPError as e:
-        return False, int((time.monotonic() - start) * 1000), f"HTTP {e.code}"
+        ms = int((time.monotonic() - start) * 1000)
+        expected = _mget(monitor, "expected_status")
+        # urllib raises before the success block for >=400, so the expected-code
+        # match for an error status has to be honoured here too.
+        if expected is not None and e.code == expected:
+            return True, ms, f"HTTP {e.code}"
+        return False, ms, f"HTTP {e.code}"
+    except _SSRFBlockedError as e:
+        return False, int((time.monotonic() - start) * 1000), f"Blocked: {e.reason}"
     except urllib.error.URLError as e:
         return False, int((time.monotonic() - start) * 1000), f"Unreachable: {e.reason}"
     except TimeoutError:
@@ -154,7 +193,11 @@ def _problem_type_for(monitor):
 def do_tcp_check(monitor):
     """Returns (ok, response_ms, detail) -- same contract as do_http_check."""
     start = time.monotonic()
-    if _is_blocked_host(monitor["url"]):
+    try:
+        addrs = ssrf_guard.resolve(monitor["url"])
+    except ssrf_guard.DNSTimeout:
+        return False, int((time.monotonic() - start) * 1000), f"DNS timeout after {ssrf_guard.DNS_TIMEOUT_SEC}s"
+    if ssrf_guard.addrs_blocked(addrs):
         return False, 0, "Blocked: target resolves to a private/internal address"
     timeout = monitor["timeout_sec"] or CHECK_TIMEOUT_SEC
     try:
@@ -173,10 +216,12 @@ def do_dns_check(monitor):
     """
     start = time.monotonic()
     try:
-        addrs = {info[4][0] for info in socket.getaddrinfo(monitor["url"], None)}
-    except socket.gaierror as e:
-        return False, int((time.monotonic() - start) * 1000), f"DNS resolution failed: {e.strerror or e}"
+        addrs = ssrf_guard.resolve(monitor["url"])
+    except ssrf_guard.DNSTimeout:
+        return False, int((time.monotonic() - start) * 1000), f"DNS timeout after {ssrf_guard.DNS_TIMEOUT_SEC}s"
     response_ms = int((time.monotonic() - start) * 1000)
+    if not addrs:
+        return False, response_ms, "DNS resolution failed"
     expected = monitor["keyword"]
     if expected and expected not in addrs:
         return False, response_ms, f"Resolved to {', '.join(sorted(addrs))}, expected {expected}"
@@ -209,38 +254,46 @@ def _record_transition(monitor, now, ok, response_ms, detail, fail_threshold=3, 
     is identical regardless of how that result was obtained. Returns a
     pending email event ("opened"/"resolved", name, detail, incident_id)
     or None, exactly like _check_one always has.
+
+    Held under _ALERT_LOCK and re-reads the monitor's current counters first,
+    so a scheduler check and a concurrent push ping (item 8) can't both act on
+    a stale snapshot and, e.g., open two incidents for the same transition.
     """
-    db.record_check(monitor["id"], now, ok, response_ms, detail)
-    new_status, fails, oks, opened, resolved = evaluate_status(
-        monitor["status"], monitor["consecutive_fails"], monitor["consecutive_oks"], ok,
-        fail_threshold=fail_threshold, ok_threshold=ok_threshold,
-    )
-    db.update_monitor_state(monitor["id"], new_status, fails, oks, now, response_ms)
-    problem_type = _problem_type_for(monitor)
-    if opened:
-        incident_id = db.open_incident(monitor["id"], monitor["name"], detail,
-                                        problem_type=problem_type)
-        # Use the incident's own `started` (set inside open_incident via a
-        # fresh time.time() call) rather than this function's `now` -- `now`
-        # is captured before the check runs and can be seconds earlier on a
-        # slow/timed-out check, which would sort this event BEFORE "opened"
-        # in the merged timeline.
-        started_ts = db.get_incident(incident_id)["started"]
-        db.record_incident_event(incident_id, started_ts, "check_failure", detail)
-        return ("opened", monitor["name"], detail, incident_id)
-    if resolved:
-        open_row = db.get_open_incident(monitor["id"], problem_type=problem_type)
-        incident_id = open_row["id"] if open_row else None
-        downtime_sec = db.resolve_incident(monitor["id"], problem_type=problem_type)
-        return ("resolved", monitor["name"], db.format_duration(downtime_sec), incident_id)
-    if not ok and new_status == "down":
-        # Still down, not a fresh transition -- a continuing failure on
-        # an already-open incident (PRD §12: incident_events logs "check
-        # failures"). No email-worthy event, so returns None as before.
-        open_row = db.get_open_incident(monitor["id"], problem_type=problem_type)
-        if open_row:
-            db.record_incident_event(open_row["id"], now, "check_failure", detail)
-    return None
+    with _ALERT_LOCK:
+        fresh = db.get_monitor(monitor["id"])
+        if fresh is not None:
+            monitor = fresh  # act on current counters, not the caller's snapshot
+        db.record_check(monitor["id"], now, ok, response_ms, detail)
+        new_status, fails, oks, opened, resolved = evaluate_status(
+            monitor["status"], monitor["consecutive_fails"], monitor["consecutive_oks"], ok,
+            fail_threshold=fail_threshold, ok_threshold=ok_threshold,
+        )
+        db.update_monitor_state(monitor["id"], new_status, fails, oks, now, response_ms)
+        problem_type = _problem_type_for(monitor)
+        if opened:
+            incident_id = db.open_incident(monitor["id"], monitor["name"], detail,
+                                            problem_type=problem_type)
+            # Use the incident's own `started` (set inside open_incident via a
+            # fresh time.time() call) rather than this function's `now` -- `now`
+            # is captured before the check runs and can be seconds earlier on a
+            # slow/timed-out check, which would sort this event BEFORE "opened"
+            # in the merged timeline.
+            started_ts = db.get_incident(incident_id)["started"]
+            db.record_incident_event(incident_id, started_ts, "check_failure", detail)
+            return ("opened", monitor["name"], detail, incident_id)
+        if resolved:
+            open_row = db.get_open_incident(monitor["id"], problem_type=problem_type)
+            incident_id = open_row["id"] if open_row else None
+            downtime_sec = db.resolve_incident(monitor["id"], problem_type=problem_type)
+            return ("resolved", monitor["name"], db.format_duration(downtime_sec), incident_id)
+        if not ok and new_status == "down":
+            # Still down, not a fresh transition -- a continuing failure on
+            # an already-open incident (PRD §12: incident_events logs "check
+            # failures"). No email-worthy event, so returns None as before.
+            open_row = db.get_open_incident(monitor["id"], problem_type=problem_type)
+            if open_row:
+                db.record_incident_event(open_row["id"], now, "check_failure", detail)
+        return None
 
 
 def record_push_ping(monitor, now):
@@ -250,6 +303,46 @@ def record_push_ping(monitor, now):
     """
     return _record_transition(monitor, now, True, None, "Check-in received",
                                fail_threshold=1, ok_threshold=1)
+
+
+def _evaluate_latency(monitor, response_ms, now):
+    """Warn when a site is UP but slow (>= LATENCY_WARN_MS) for 2 consecutive
+    reads, resolving when it recovers. A separate problem_type="latency"
+    incident, so a slow site never conflates with an up/down outage. Only
+    http-style checks (website/crm, which is where API monitors live) have a
+    meaningful response time. Runs under _ALERT_LOCK like every other
+    transition (item 8), and resolve is scoped to the latency problem_type so
+    it can't close an unrelated incident."""
+    if response_ms is None or monitor["type"] not in ("website", "crm"):
+        return
+    with _ALERT_LOCK:
+        state_key = f"latency:{monitor['id']}"
+        state = db.get_metric_state(state_key)
+        status = state["status"] if state else "ok"
+        pending_zone = state["pending_zone"] if state else None
+        pending_count = state["pending_count"] if state else 0
+        incident_id = state["incident_id"] if state else None
+
+        zone = "warning" if response_ms >= LATENCY_WARN_MS else "ok"
+        new_status, npz, npc, transition = server_health.evaluate_metric_zone(
+            status, pending_zone, pending_count, zone)
+
+        if transition == "open":
+            detail = f"Slow response: {response_ms}ms (over {LATENCY_WARN_MS}ms)"
+            incident_id = db.open_incident(monitor["id"], monitor["name"], detail,
+                                           severity="warning", problem_type="latency")
+            subject, body, html = email_alerts.format_alert(monitor["name"], detail, "warning",
+                                                            url=monitor["url"], ts=now)
+            email_alerts.send_and_record(incident_id, subject, body, html)
+        elif transition == "resolve":
+            downtime = db.resolve_incident(monitor["id"], problem_type="latency")
+            subject, body, html = email_alerts.format_recovered(
+                f"{monitor['name']} (latency)", db.format_duration(downtime),
+                url=monitor["url"], ts=now)
+            email_alerts.send_and_record(incident_id, subject, body, html)
+            incident_id = None
+
+        db.set_metric_state(state_key, new_status, npz, npc, incident_id, now)
 
 
 def _check_one(monitor, now):
@@ -279,9 +372,22 @@ def _check_one(monitor, now):
         # retries=0 means Kuma's "down immediately on first fail" (fail_threshold=1);
         # unset (None) reproduces today's global default (fail_threshold=3).
         retries = monitor["retries"] if monitor["retries"] is not None else 2
-        return _record_transition(monitor, now, ok, response_ms, detail, fail_threshold=retries + 1)
+        event = _record_transition(monitor, now, ok, response_ms, detail, fail_threshold=retries + 1)
+        if ok:
+            _evaluate_latency(monitor, response_ms, now)  # slow-but-up degradation signal
+        return event
     except Exception as e:
         print(f"[monitor_engine] check failed for monitor {monitor['id']}: {e}")
+        # A crash in the check (unknown type -> KeyError, bad request body ->
+        # ValueError, resolver blowup) must still record a result and advance
+        # last_checked_at -- otherwise the monitor never goes down, never
+        # alerts, and get_due_monitors re-runs it every TICK_SEC forever.
+        try:
+            retries = monitor["retries"] if monitor["retries"] is not None else 2
+            return _record_transition(monitor, now, False, None, f"Internal error: {e}",
+                                      fail_threshold=retries + 1)
+        except Exception as e2:
+            print(f"[monitor_engine] could not record failed check for {monitor['id']}: {e2}")
     return None
 
 
@@ -331,6 +437,16 @@ def _incident_context(incident_id):
 
 
 def handle_tick_events(events):
+    """Serialize alert processing under _ALERT_LOCK: push_ping runs this on a
+    web thread at the same time the scheduler thread does (item 8), and both
+    touch _PENDING, _BATCH_STARTED_AT and the correlated-outage state. One lock
+    around the whole thing prevents duplicate/lost batches and double server
+    incidents."""
+    with _ALERT_LOCK:
+        _handle_tick_events_locked(events)
+
+
+def _handle_tick_events_locked(events):
     """Decides, once a tick's checks have all committed, whether this
     tick's opened/resolved transitions are 15 unrelated incidents or one
     shared-cause outage (PRD §9/§15) — and sends exactly the alert(s) that
@@ -355,8 +471,7 @@ def handle_tick_events(events):
         subject, body, html_body = email_alerts.format_server_alert(
             f"Correlated outage — {down_count} of {total} monitored sites down", "critical",
             ts=time.time())
-        email_alerts.send(subject, body, html_body)
-        db.record_incident_event(incident_id, time.time(), "email_sent", subject)
+        email_alerts.send_and_record(incident_id, subject, body, html_body)
         db.set_metric_state("correlated_outage", "active", None, 0, incident_id, time.time())
         return  # this tick's individual events are the same root cause — suppressed
 
@@ -364,8 +479,7 @@ def handle_tick_events(events):
         downtime_sec = db.resolve_server_incident(state["incident_id"])
         subject, body, html_body = email_alerts.format_recovered(
             "Server (correlated outage)", db.format_duration(downtime_sec), ts=time.time())
-        email_alerts.send(subject, body, html_body)
-        db.record_incident_event(state["incident_id"], time.time(), "email_sent", subject)
+        email_alerts.send_and_record(state["incident_id"], subject, body, html_body)
         db.set_metric_state("correlated_outage", "inactive", None, 0, None, time.time())
         return  # the individual recovery that triggered this is part of the same event
 
@@ -396,6 +510,11 @@ def _queue_alert(kind, item, now):
     _PENDING[kind].append(item)
     if _BATCH_STARTED_AT[kind] is None:
         _BATCH_STARTED_AT[kind] = now
+    # Persist so a restart inside the batch window doesn't drop the alert.
+    try:
+        db.save_pending_alert(kind, json.dumps(item), _BATCH_STARTED_AT[kind])
+    except Exception as e:
+        print(f"[monitor_engine] could not persist pending alert: {e}")
     if now - _BATCH_STARTED_AT[kind] >= ALERT_BATCH_WINDOW_SEC:
         _flush_batch(kind)
 
@@ -415,15 +534,41 @@ def _flush_batch(kind):
     items = _PENDING[kind]
     if not items:
         return
-    _PENDING[kind] = []
-    _BATCH_STARTED_AT[kind] = None
     formatter = email_alerts.format_down_batch if kind == "opened" else email_alerts.format_recovered_batch
     subject, body, html_body = formatter(items)
-    email_alerts.send(subject, body, html_body)
+    sent = email_alerts.send(subject, body, html_body)
+    if sent is False:
+        # Keep the batch queued (in memory and persisted) so the next tick
+        # retries instead of silently dropping it -- the monitors are already
+        # 'down', so a lost alert would never be re-raised.
+        return
+    _PENDING[kind] = []
+    _BATCH_STARTED_AT[kind] = None
+    try:
+        db.clear_pending_alerts(kind)
+    except Exception as e:
+        print(f"[monitor_engine] could not clear persisted alerts: {e}")
     sent_at = time.time()
     for item in items:
         if item["incident_id"] is not None:
             db.record_incident_event(item["incident_id"], sent_at, "email_sent", subject)
+
+
+def _load_pending_alerts():
+    """Restore batched alerts persisted by _queue_alert so a restart inside the
+    batch window doesn't drop them. Called once at scheduler start; the next
+    _flush_expired_batches tick mails anything already past its window."""
+    for kind in ("opened", "resolved"):
+        _PENDING[kind] = []
+        _BATCH_STARTED_AT[kind] = None
+    for row in db.list_pending_alerts():
+        kind = row["kind"]
+        if kind not in _PENDING:
+            continue
+        _PENDING[kind].append(json.loads(row["item_json"]))
+        started = row["batch_started_at"]
+        if _BATCH_STARTED_AT[kind] is None or started < _BATCH_STARTED_AT[kind]:
+            _BATCH_STARTED_AT[kind] = started
 
 
 def purge_old_checks():
@@ -454,6 +599,11 @@ def run_due_checks():
 
 
 def start_background_scheduler(debug=False):
+    try:
+        _load_pending_alerts()  # recover alerts batched but unsent before a restart
+    except Exception as e:
+        print(f"[monitor_engine] could not reload pending alerts: {e}")
+
     def loop():
         while True:
             try:
@@ -468,6 +618,18 @@ def start_background_scheduler(debug=False):
                 ssl_check.check_all_ssl(db.list_monitors())
             except Exception as e:
                 print(f"[monitor_engine] ssl-check tick failed: {e}")
+            try:
+                whm_discovery.discover_all()  # auto-add monitors for every WHM site
+            except Exception as e:
+                print(f"[monitor_engine] whm-discovery tick failed: {e}")
+            try:
+                whm_health.check_all()  # remote cPanel server resource health
+            except Exception as e:
+                print(f"[monitor_engine] whm-health tick failed: {e}")
+            try:
+                whm_security.check_all()  # surface WHM malware/ModSecurity/cPHulk alerts
+            except Exception as e:
+                print(f"[monitor_engine] whm-security tick failed: {e}")
             try:
                 purge_old_checks()
             except Exception as e:

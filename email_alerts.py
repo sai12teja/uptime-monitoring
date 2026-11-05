@@ -626,3 +626,20 @@ def send(subject, body, html_body=None):
     except (smtplib.SMTPException, OSError, ValueError) as e:
         print(f"[email_alerts] send failed: {e}")
         return False
+
+
+def send_and_record(incident_id, subject, body, html_body=None, when=None):
+    """Send an alert and log the TRUTHFUL outcome against `incident_id`.
+
+    Callers used to record an 'email_sent' incident event unconditionally
+    right after send(), so a muted or failed send (send() returns False) still
+    left the timeline claiming an email went out. Record 'email_failed' in that
+    case instead, and return send()'s result so batch callers can retry rather
+    than drop the alert. A test double for send() that returns None counts as
+    sent -- only an explicit False is a failure.
+    """
+    sent = send(subject, body, html_body)
+    if incident_id is not None:
+        event = "email_failed" if sent is False else "email_sent"
+        db.record_incident_event(incident_id, time.time() if when is None else when, event, subject)
+    return sent
