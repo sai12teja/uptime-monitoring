@@ -107,6 +107,13 @@ CREATE TABLE IF NOT EXISTS pending_alerts (
     item_json TEXT NOT NULL,
     batch_started_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS maintenance_windows (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    starts REAL NOT NULL,
+    ends REAL NOT NULL,
+    reason TEXT,
+    created_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_checks_monitor_ts ON checks(monitor_id, ts);
 CREATE INDEX IF NOT EXISTS idx_incidents_monitor_type ON incidents(monitor_id, problem_type);
 CREATE INDEX IF NOT EXISTS idx_incidents_resolved ON incidents(resolved);
@@ -529,6 +536,42 @@ def list_pending_alerts():
 def clear_pending_alerts(kind):
     with _conn() as conn:
         conn.execute("DELETE FROM pending_alerts WHERE kind = ?", (kind,))
+
+
+def add_maintenance_window(starts, ends, reason=None):
+    """A planned window during which alerts are suppressed (checks still run;
+    incidents still open and show on the dashboard -- we just don't page)."""
+    with _conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO maintenance_windows (starts, ends, reason, created_at) VALUES (?, ?, ?, ?)",
+            (starts, ends, reason, time.time()),
+        )
+        return cur.lastrowid
+
+
+def get_maintenance_window(window_id):
+    with _conn() as conn:
+        return conn.execute("SELECT * FROM maintenance_windows WHERE id = ?", (window_id,)).fetchone()
+
+
+def list_maintenance_windows():
+    with _conn() as conn:
+        return conn.execute("SELECT * FROM maintenance_windows ORDER BY starts DESC").fetchall()
+
+
+def active_maintenance_window(now):
+    """The maintenance window covering `now`, if any -- the one check the alert
+    path makes before delivering."""
+    with _conn() as conn:
+        return conn.execute(
+            "SELECT * FROM maintenance_windows WHERE starts <= ? AND ends > ? ORDER BY ends DESC LIMIT 1",
+            (now, now),
+        ).fetchone()
+
+
+def delete_maintenance_window(window_id):
+    with _conn() as conn:
+        conn.execute("DELETE FROM maintenance_windows WHERE id = ?", (window_id,))
 
 
 init_db()

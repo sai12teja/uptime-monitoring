@@ -17,7 +17,9 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 import db
+import domain_check
 import email_alerts
+import heartbeat
 import server_health
 import ssl_check
 import ssrf_guard
@@ -624,6 +626,10 @@ def start_background_scheduler(debug=False):
             except Exception as e:
                 print(f"[monitor_engine] ssl-check tick failed: {e}")
             try:
+                domain_check.check_all_domains(db.list_monitors())  # registration-expiry
+            except Exception as e:
+                print(f"[monitor_engine] domain-check tick failed: {e}")
+            try:
                 whm_discovery.discover_all()  # auto-add monitors for every WHM site
             except Exception as e:
                 print(f"[monitor_engine] whm-discovery tick failed: {e}")
@@ -639,6 +645,10 @@ def start_background_scheduler(debug=False):
                 purge_old_checks()
             except Exception as e:
                 print(f"[monitor_engine] checks-retention purge failed: {e}")
+            try:
+                heartbeat.ping()  # external dead-man's switch: a ping = a full tick completed
+            except Exception as e:
+                print(f"[monitor_engine] heartbeat ping failed: {e}")
             time.sleep(TICK_SEC)
 
     # Under `--debug`, Werkzeug's reloader re-imports app.py in a parent
