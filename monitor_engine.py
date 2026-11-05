@@ -17,6 +17,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 import db
+import digest
 import dns_check
 import domain_check
 import email_alerts
@@ -650,6 +651,10 @@ def start_background_scheduler(debug=False):
                 purge_old_checks()
             except Exception as e:
                 print(f"[monitor_engine] checks-retention purge failed: {e}")
+            try:
+                digest.maybe_send(time.time())  # weekly uptime/SLA summary (opt-in)
+            except Exception as e:
+                print(f"[monitor_engine] weekly-digest failed: {e}")
             try:
                 heartbeat.ping()  # external dead-man's switch: a ping = a full tick completed
             except Exception as e:
