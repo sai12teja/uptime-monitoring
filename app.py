@@ -754,6 +754,66 @@ def build_stat_card(label, value, warn_at=80, crit_at=95):
     )
 
 
+_WHM_ICON = {"ok": "status-up", "critical": "status-down", "crit": "status-down",
+             "active": "status-down", "down": "status-down", "warning": "status-overdue",
+             "warn": "status-overdue", "overdue": "status-overdue"}
+
+
+def _whm_status_pill(overall):
+    label = {"ok": "Healthy", "warning": "Warning", "critical": "Critical"}.get(overall, "Unknown")
+    cls = {"ok": "pill-up", "warning": "pill-overdue", "critical": "pill-down"}.get(overall, "pill-awaiting")
+    return html.Span(label, className=f"status-pill {cls}")
+
+
+def _whm_row(label, value_text, status):
+    icon = _WHM_ICON.get(status, "status-overdue")  # unknown/awaiting -> amber, never silent green
+    return html.Div(className="summary-stat-row", children=[
+        html.Span(className=f"summary-stat-icon {icon}"),
+        html.Span(label, className="summary-stat-label"),
+        html.Span(value_text, className="summary-stat-value"),
+    ])
+
+
+def _sec_text(v):
+    if v == "ok":
+        return "Clean"
+    if v in ("active", "critical", "crit", "down"):
+        return "⚠ ALERT"
+    return "not reporting yet"
+
+
+def _build_whm_section():
+    """Remote WHM server(s) health + security, surfaced on the Server Health
+    page. Omitted entirely when no WHM server is configured."""
+    servers = data.get_whm_servers()
+    if not servers:
+        return None
+    cards = []
+    for s in servers:
+        cpu, disk = s["cpu"], s["disk"]
+        cpu_txt = f"{cpu['value']}%" if cpu["value"] is not None else "—"
+        disk_txt = f"{disk['value']}%" if disk["value"] is not None else "needs root privilege"
+        sec = s["security"]
+        checked = (f"checked {s['checked_sec']}s ago" if s["checked_sec"] is not None
+                   else "awaiting first poll")
+        cards.append(html.Div(className="summary-stat-card", children=[
+            html.Div(className="summary-stat-header", children=[
+                html.Div(s["host"], className="summary-stat-title"),
+                _whm_status_pill(s["overall"]),
+            ]),
+            _whm_row("CPU load", cpu_txt, cpu["status"] or "ok"),
+            _whm_row("Disk usage", disk_txt, disk["status"]),
+            _whm_row("Malware (Imunify360)", _sec_text(sec["imunify"]), sec["imunify"]),
+            _whm_row("Brute-force (cPHulk)", _sec_text(sec["cphulk"]), sec["cphulk"]),
+            _whm_row("Web attacks (ModSecurity)", _sec_text(sec["modsec"]), sec["modsec"]),
+            html.Div(checked, className="summary-stat-footer"),
+        ]))
+    return html.Div(children=[
+        html.H2("WHM Servers", className="section-heading"),
+        html.Div(className="summary-stat-row-outer", children=cards),
+    ])
+
+
 def build_server_panel_inner():
     m = data.get_server_metrics()
     # Same THRESHOLDS the incident logic uses (server_health.py) — a card
@@ -786,15 +846,17 @@ def build_server_panel_inner():
         service_rows = [html.Div("Service status unavailable on this host.",
                                  className="empty-state-hint")]
 
-    return html.Div(
-        children=[
-            html.Div(className="server-panel", children=stats),
-            html.Div(
-                className="services-card",
-                children=[html.Div("Core services", className="services-card-label")] + service_rows,
-            ),
-        ]
-    )
+    children = [
+        html.Div(className="server-panel", children=stats),
+        html.Div(
+            className="services-card",
+            children=[html.Div("Core services", className="services-card-label")] + service_rows,
+        ),
+    ]
+    whm = _build_whm_section()
+    if whm is not None:
+        children.append(whm)
+    return html.Div(children=children)
 
 
 # ---------- Loading skeletons (§13.2 — "never a blank white page") ----------

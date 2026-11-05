@@ -20,6 +20,7 @@ rather than guessing an endpoint.
 import json
 import os
 import ssl as _ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -28,6 +29,20 @@ from concurrent.futures import ThreadPoolExecutor
 import db
 import email_alerts
 from server_health import evaluate_metric_zone, zone_for
+
+# Most-recent fetched metric VALUES per host, cached in-memory so the dashboard
+# can show live numbers (metric_state persists only pass/fail status, not the
+# value). The scheduler thread and the Dash UI run in one process, so this dict
+# is shared directly -- no DB column, no extra WHM call on render.
+_LATEST = {}
+_LATEST_LOCK = threading.Lock()
+
+
+def latest():
+    """Snapshot of the last-polled values per host: {host: {"metrics": {...},
+    "ts": epoch}}. Empty until the scheduler has run at least one WHM tick."""
+    with _LATEST_LOCK:
+        return {h: {"metrics": dict(v["metrics"]), "ts": v["ts"]} for h, v in _LATEST.items()}
 
 
 def _int_env(name, default):
@@ -239,6 +254,14 @@ def check_all():
     tasks = [(host, token, key) for (host, token) in due for key in _FETCHERS]
     with ThreadPoolExecutor(max_workers=min(MAX_WHM_WORKERS, len(tasks))) as pool:
         readings = list(pool.map(lambda t: (t, _fetch_one(*t)), tasks))
+
+    # Cache the raw values for the dashboard before evaluation.
+    snapshot = {}
+    for (host, _token, key), value in readings:
+        snapshot.setdefault(host, {})[key] = value
+    with _LATEST_LOCK:
+        for host, metrics in snapshot.items():
+            _LATEST[host] = {"metrics": metrics, "ts": now}
 
     for (host, _token, key), value in readings:
         warn_at, crit_at = THRESHOLDS[key]

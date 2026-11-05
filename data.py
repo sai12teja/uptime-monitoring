@@ -47,6 +47,47 @@ def get_server_metrics():
     return server_health.read_all()
 
 
+def get_whm_servers():
+    """Remote WHM server(s) health for the Server Health page: live values from
+    whm_health's in-memory cache + the persisted pass/fail status per metric and
+    per security source. Empty list when no WHM server is configured (feature
+    dormant), so the UI simply omits the section."""
+    import whm_health  # local import: dormant unless WHM_SERVERS is configured
+    configured = whm_health.servers()
+    if not configured:
+        return []
+    now = time.time()
+    snapshot = whm_health.latest()
+    _crit = {"crit", "critical", "active", "down"}
+    _warn = {"warn", "warning", "overdue"}
+    out = []
+    for host, _token in configured:
+        metrics = snapshot.get(host, {}).get("metrics", {})
+        poll = db.get_metric_state(f"whm:{host}:_poll")
+        checked_sec = int(now - poll["last_read_ts"]) if poll else None
+
+        def metric(key):
+            st = db.get_metric_state(f"whm:{host}:{key}")
+            return {"value": metrics.get(key), "status": st["status"] if st else None}
+
+        security = {}
+        for src in ("imunify", "cphulk", "modsec"):
+            st = db.get_metric_state(f"whmsec:{host}:{src}")
+            security[src] = st["status"] if st else None
+
+        cpu, disk, mem, mailq = metric("cpu"), metric("disk"), metric("mem"), metric("mailq")
+        all_status = [cpu["status"], disk["status"], mem["status"], mailq["status"], *security.values()]
+        if any(s in _crit for s in all_status if s):
+            overall = "critical"
+        elif any(s in _warn for s in all_status if s):
+            overall = "warning"
+        else:
+            overall = "ok"
+        out.append({"host": host, "checked_sec": checked_sec, "overall": overall,
+                    "cpu": cpu, "disk": disk, "mem": mem, "mailq": mailq, "security": security})
+    return out
+
+
 def is_correlated_outage():
     state = db.get_metric_state("correlated_outage")
     return state is not None and state["status"] == "active"
