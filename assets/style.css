@@ -765,8 +765,9 @@ details[open] > summary.target-card-summary > .target-card-name::after {
 }
 
 .target-card-subrows {
-  max-height: 220px;
+  max-height: 240px;
   overflow-y: auto;
+  overflow-x: hidden;  /* never a sideways scrollbar, no matter the path length */
 }
 
 @keyframes subrows-reveal {
@@ -845,19 +846,15 @@ summary.target-card-summary .target-card-link { position: relative; z-index: 1; 
 /* Grouped card — one multi-select submission, one status line per check type */
 .target-card-subrow {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space-2);
-  width: 100%;
+  width: 100%;              /* exactly the container width -- no overflow */
   background: none;
   border: none;
   border-radius: var(--radius);
   border-top: 1px solid var(--color-border);
-  /* Horizontal padding + matching negative margin: gives the hover tint
-     room to render behind the text without shifting where the text itself
-     visually sits relative to the rest of the card. */
-  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-2);
-  margin: 0 calc(var(--space-2) * -1);
-  width: calc(100% + var(--space-4));
+  padding: var(--space-2);
+  margin: 0;
   font-family: inherit;
   color: inherit;
   font-size: 14px;
@@ -866,11 +863,7 @@ summary.target-card-summary .target-card-link { position: relative; z-index: 1; 
   transition: background-color var(--transition);
 }
 
-/* Last row keeps zero EXTRA space before the card's own bottom padding —
-   same intent as the original padding-bottom:0, just expressed as a
-   negative bottom margin now that vertical padding is uniform (needed so
-   the hover-tint background can also cover the row's own bottom edge). */
-.target-card-subrow:last-of-type { margin-bottom: calc(var(--space-2) * -1); }
+.target-card-subrow:last-of-type { margin-bottom: 0; }
 
 /* Whole row carries its own status colour — an up check reads green end to
    end, anything not up reads in its status colour, so a glance down the
@@ -886,19 +879,25 @@ summary.target-card-summary .target-card-link { position: relative; z-index: 1; 
    the text baseline instead of letting it ride high. */
 .target-card-subrow .status-dot { align-self: center; }
 
-/* Inherits the row's status colour rather than setting its own. */
-.target-card-subtype { transition: color 0.15s ease; }
+/* Path takes the free space and ellipsizes, so a long /some/deep/page.html
+   never pushes the status+time off the row or forces a sideways scroll. */
+.target-card-subtype {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.15s ease;
+}
 
-/* Status + timing form one right-aligned column so the eye scans straight
-   down it, rather than hunting across a wide empty gap. */
+/* Status + timing sit as a fixed right-aligned column the eye scans down. */
 .target-card-substatus {
-  margin-left: auto;
+  flex-shrink: 0;
   font-weight: 500;
 }
 
-/* Tints with the row but stays subordinate — the number is context, not
-   the status signal itself. */
 .target-card-subtime {
+  flex-shrink: 0;
   font-family: var(--font-mono);
   font-size: 13px;
   opacity: 0.75;
