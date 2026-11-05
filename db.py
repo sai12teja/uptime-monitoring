@@ -114,6 +114,11 @@ CREATE TABLE IF NOT EXISTS maintenance_windows (
     reason TEXT,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS dns_records (
+    monitor_id INTEGER PRIMARY KEY REFERENCES monitors(id),
+    records TEXT NOT NULL,
+    checked_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_checks_monitor_ts ON checks(monitor_id, ts);
 CREATE INDEX IF NOT EXISTS idx_incidents_monitor_type ON incidents(monitor_id, problem_type);
 CREATE INDEX IF NOT EXISTS idx_incidents_resolved ON incidents(resolved);
@@ -572,6 +577,20 @@ def active_maintenance_window(now):
 def delete_maintenance_window(window_id):
     with _conn() as conn:
         conn.execute("DELETE FROM maintenance_windows WHERE id = ?", (window_id,))
+
+
+def get_dns_baseline(monitor_id):
+    with _conn() as conn:
+        return conn.execute("SELECT * FROM dns_records WHERE monitor_id = ?", (monitor_id,)).fetchone()
+
+
+def set_dns_baseline(monitor_id, records, checked_at):
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO dns_records (monitor_id, records, checked_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(monitor_id) DO UPDATE SET records = excluded.records, checked_at = excluded.checked_at",
+            (monitor_id, records, checked_at),
+        )
 
 
 init_db()

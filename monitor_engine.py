@@ -17,6 +17,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 import db
+import dns_check
 import domain_check
 import email_alerts
 import heartbeat
@@ -629,6 +630,10 @@ def start_background_scheduler(debug=False):
                 domain_check.check_all_domains(db.list_monitors())  # registration-expiry
             except Exception as e:
                 print(f"[monitor_engine] domain-check tick failed: {e}")
+            try:
+                dns_check.check_all_dns(db.list_monitors())  # A/AAAA-change (hijack signal)
+            except Exception as e:
+                print(f"[monitor_engine] dns-check tick failed: {e}")
             try:
                 whm_discovery.discover_all()  # auto-add monitors for every WHM site
             except Exception as e:
