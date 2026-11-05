@@ -5,9 +5,11 @@ code (§16) — read from environment variables, log-and-skip if unset rather
 than crash the scheduler over a missing secret (§15: "log the failure").
 """
 import html as _html
+import json
 import os
 import smtplib
 import time
+import urllib.request
 from email.message import EmailMessage
 
 import db
@@ -574,22 +576,15 @@ def format_server_alert(detail, severity, ts=None):
     return format_alert("Server", detail, severity, ts=ts)
 
 
-def send(subject, body, html_body=None):
-    """`body` is the plain-text part; `html_body`, when given, is attached as
-    a multipart/alternative HTML part. Optional so a caller with only text
-    (and the send()-level tests) still works unchanged -- clients that can't
-    or won't render HTML fall back to the text part automatically.
-    """
+def _send_email(subject, body, html_body=None):
+    """Deliver via SMTP. True on success; False if email isn't configured (no
+    SMTP_HOST) or the send fails (logged). Mute is handled by send()."""
     host = os.environ.get("SMTP_HOST")
     if not host:
-        print(f"[email_alerts] SMTP_HOST not set, skipping: {subject}")
+        print(f"[email_alerts] SMTP_HOST not set, skipping email: {subject}")
         return False
 
     settings = db.get_settings()
-    if settings is not None and not settings["notify_enabled"]:
-        print(f"[email_alerts] notifications muted, skipping: {subject}")
-        return False
-
     to = os.environ.get("ALERT_TO", "")
     if settings is not None:
         emails = [e for e in (settings["email_1"], settings["email_2"], settings["email_3"]) if e]
@@ -624,8 +619,70 @@ def send(subject, body, html_body=None):
             server.send_message(msg)
         return True
     except (smtplib.SMTPException, OSError, ValueError) as e:
-        print(f"[email_alerts] send failed: {e}")
+        print(f"[email_alerts] email send failed: {e}")
         return False
+
+
+def _post_webhook(url, payload):
+    """POST a JSON payload to a chat/webhook endpoint (Slack, Discord, Teams, a
+    generic receiver). urllib only -- no new dependency. True on a 2xx."""
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(url, data=data, method="POST",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return 200 <= getattr(resp, "status", 0) < 300
+    except Exception as e:
+        print(f"[email_alerts] webhook send failed: {e}")
+        return False
+
+
+def _send_webhooks(subject, body):
+    """Fan out to every configured webhook channel, each isolated so one failing
+    channel never blocks the others. True if any accepted the alert. Slack and
+    Discord both take {"text": ...}; a generic receiver gets structured fields.
+    Unset env -> that channel is simply skipped."""
+    delivered = False
+    slack = os.environ.get("SLACK_WEBHOOK_URL")
+    if slack:
+        delivered = _post_webhook(slack, {"text": f"*{subject}*\n{body}"}) or delivered
+    generic = os.environ.get("ALERT_WEBHOOK_URL")
+    if generic:
+        delivered = _post_webhook(generic, {"subject": subject, "body": body}) or delivered
+    return delivered
+
+
+def _in_maintenance():
+    """True if a maintenance window is active right now -- planned work during
+    which we suppress every alert. Any lookup error means 'not in maintenance',
+    so a DB hiccup never silently swallows alerts."""
+    try:
+        return db.active_maintenance_window(time.time()) is not None
+    except Exception:
+        return False
+
+
+def send(subject, body, html_body=None):
+    """Deliver an alert across EVERY configured channel -- email (SMTP) and any
+    chat webhooks (Slack/Discord/generic). `body` is plain text; `html_body`,
+    when given, is the email's HTML alternative (clients that can't render it
+    fall back to the text part). Returns True if ANY channel accepted it, so a
+    batch only retries when the alert reached nobody. The global notify toggle
+    (dashboard Settings) and an active maintenance window each mute every
+    channel at once.
+    """
+    settings = db.get_settings()
+    if settings is not None and not settings["notify_enabled"]:
+        print(f"[email_alerts] notifications muted, skipping: {subject}")
+        return False
+    if _in_maintenance():
+        print(f"[email_alerts] in maintenance window, skipping: {subject}")
+        return False
+    email_ok = _send_email(subject, body, html_body)
+    webhook_ok = _send_webhooks(subject, body)
+    if not (email_ok or webhook_ok):
+        print(f"[email_alerts] no channel delivered: {subject}")
+    return email_ok or webhook_ok
 
 
 def send_and_record(incident_id, subject, body, html_body=None, when=None):
@@ -640,6 +697,11 @@ def send_and_record(incident_id, subject, body, html_body=None, when=None):
     """
     sent = send(subject, body, html_body)
     if incident_id is not None:
-        event = "email_failed" if sent is False else "email_sent"
+        if sent is False:
+            # Distinguish a real failure from a deliberate maintenance mute, so
+            # the incident timeline reads "suppressed", not a misleading error.
+            event = "suppressed" if _in_maintenance() else "email_failed"
+        else:
+            event = "email_sent"
         db.record_incident_event(incident_id, time.time() if when is None else when, event, subject)
     return sent

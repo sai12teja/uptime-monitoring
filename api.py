@@ -9,6 +9,7 @@ own session-based gate (auth.py) untouched.
 """
 import hmac
 import os
+import time
 
 from flask import Blueprint, jsonify, request
 
@@ -259,5 +260,40 @@ def register_api(server):
         if err:
             return jsonify({"error": err}), 400
         return jsonify({"host": host, "accepted": accepted}), 200
+
+    @bp.route("/maintenance", methods=["GET"])
+    def api_list_maintenance():
+        return jsonify([dict(w) for w in db.list_maintenance_windows()])
+
+    @bp.route("/maintenance", methods=["POST"])
+    def api_create_maintenance():
+        # Plan a window during which ALL alerts are suppressed (checks still run;
+        # incidents still show on the dashboard). Give either 'minutes' (from
+        # 'starts', default now) or an explicit 'ends' epoch.
+        body = request.get_json(silent=True) or {}
+        starts = body.get("starts", time.time())
+        if isinstance(starts, bool) or not isinstance(starts, (int, float)):
+            return jsonify({"error": "starts must be an epoch timestamp"}), 400
+        if body.get("minutes") is not None:
+            minutes, err = _coerce_int(body.get("minutes"), "minutes", minimum=1, maximum=100000)
+            if err:
+                return jsonify({"error": err}), 400
+            ends = starts + minutes * 60
+        else:
+            ends = body.get("ends")
+            if isinstance(ends, bool) or not isinstance(ends, (int, float)):
+                return jsonify({"error": "provide 'minutes' or an 'ends' epoch timestamp"}), 400
+        if ends <= starts:
+            return jsonify({"error": "ends must be after starts"}), 400
+        reason = (body.get("reason") or "").strip() or None
+        wid = db.add_maintenance_window(starts, ends, reason)
+        return jsonify(dict(db.get_maintenance_window(wid))), 201
+
+    @bp.route("/maintenance/<int:window_id>", methods=["DELETE"])
+    def api_delete_maintenance(window_id):
+        if db.get_maintenance_window(window_id) is None:
+            return jsonify({"error": "not found"}), 404
+        db.delete_maintenance_window(window_id)
+        return "", 204
 
     server.register_blueprint(bp)
