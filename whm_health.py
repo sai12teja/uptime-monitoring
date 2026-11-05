@@ -45,6 +45,18 @@ def latest():
         return {h: {"metrics": dict(v["metrics"]), "ts": v["ts"]} for h, v in _LATEST.items()}
 
 
+def prime():
+    """Reset each server's poll gate so the very next scheduler tick re-polls
+    immediately, repopulating the in-memory value cache right after a restart
+    (otherwise the dashboard shows "—" for CPU until the normal 60s gate opens).
+    Called once at scheduler startup; safe no-op when no WHM server is set."""
+    for host, _token in servers():
+        try:
+            db.set_metric_state(f"whm:{host}:_poll", "ok", None, 0, None, 0)  # ts=0 -> due now
+        except Exception as e:
+            print(f"[whm_health] prime gate reset failed for {host}: {e}")
+
+
 def _int_env(name, default):
     """Parse an int env var, falling back to the default on anything invalid --
     a typo in a threshold must never crash the app at import time."""

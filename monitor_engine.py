@@ -604,6 +604,11 @@ def start_background_scheduler(debug=False):
     except Exception as e:
         print(f"[monitor_engine] could not reload pending alerts: {e}")
 
+    try:
+        whm_health.prime()  # force a WHM re-poll on the first tick so CPU shows right away
+    except Exception as e:
+        print(f"[monitor_engine] whm prime failed: {e}")
+
     def loop():
         while True:
             try:
