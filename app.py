@@ -804,8 +804,6 @@ def _build_whm_section():
             _whm_row("CPU load", cpu_txt, cpu["status"] or "ok"),
             _whm_row("Disk usage", disk_txt, disk["status"]),
             _whm_row("Malware (Imunify360)", _sec_text(sec["imunify"]), sec["imunify"]),
-            _whm_row("Brute-force (cPHulk)", _sec_text(sec["cphulk"]), sec["cphulk"]),
-            _whm_row("Web attacks (ModSecurity)", _sec_text(sec["modsec"]), sec["modsec"]),
             html.Div(checked, className="summary-stat-footer"),
         ]))
     return html.Div(children=[
