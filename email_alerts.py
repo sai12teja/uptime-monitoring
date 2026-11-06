@@ -195,13 +195,19 @@ def _premium_detail_rows(rows, accent):
                     f'border-bottom:1px dashed {accent};">{_esc(text)}</a>')
         else:
             cell = _esc(text)
+        # The reason is the "why" -- the first thing the reader wants. Brighter
+        # and bolder than the supporting rows so it reads as the headline fact.
+        if label == "Reason":
+            val = (f'font-size:14px;color:#f2fff7;font-weight:700;')
+        else:
+            val = (f'font-size:13px;color:#d7e6df;')
         out.append(
             '<tr>'
             f'<td style="padding:12px 0;border-top:1px solid #131f33;font-family:{_MONO};font-size:10px;'
             'letter-spacing:1.5px;text-transform:uppercase;color:#6d8a80;width:130px;'
             f'vertical-align:top;white-space:nowrap;">{_esc(label)}</td>'
-            f'<td style="padding:12px 0;border-top:1px solid #131f33;font-family:{_MONO};font-size:13px;'
-            f'color:#d7e6df;word-break:break-word;">{cell}</td>'
+            f'<td style="padding:12px 0;border-top:1px solid #131f33;font-family:{_MONO};{val}'
+            f'word-break:break-word;">{cell}</td>'
             '</tr>'
         )
     return "".join(out)
@@ -394,15 +400,18 @@ def format_down(monitor_name, detail, url=None, ts=None, context=None):
         return subject, body, simple_html
 
     fail_threshold = context["fail_threshold"]
+    # Hero cells are for short, glanceable stats -- the long reason sentence
+    # belongs in a readable row below, not crammed into a big-number slot.
     hero = [
-        ("Reason", _esc(detail)),
         ("Failed checks", f"{fail_threshold}/{fail_threshold}"),
         ("Down since", _esc(_fmt_hms(ts)) or "—"),
+        ("Check interval", f"{context['interval_sec']}s"),
     ]
     detail_rows = [
+        ("Reason", _esc(detail)),
         ("Target", url),
         ("Detected at", _fmt_ts(ts)),
-        ("Check type", f"{context['check_type']} check every {context['interval_sec']}s"),
+        ("Check type", f"{context['check_type']} check"),
     ]
     note = (f"<b style=\"color:#ffb020;\">Auto-recheck is running.</b> You&rsquo;ll get a recovery "
             f"email the moment {_esc(monitor_name)} responds again &mdash; no need to refresh.")
