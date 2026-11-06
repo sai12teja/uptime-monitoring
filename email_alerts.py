@@ -63,6 +63,32 @@ def _esc(value):
     return _html.escape(str(value), quote=True)
 
 
+def _wrap_email(inner):
+    """Wrap a card fragment in a minimal responsive HTML document. The inline
+    table layout is already fluid (max-width + width:100%); this adds the two
+    levers mail clients actually respect for mobile: a viewport meta (so phones
+    render at device width instead of a pinch-to-zoom desktop view) and a
+    <style> with media queries (honoured by Apple/iOS Mail, Gmail app, Outlook
+    mobile; clients that strip it just keep the fluid base). Classes em-pad /
+    em-trace / em-btn-a on the cards are the hooks."""
+    return (
+        '<!doctype html><html lang="en"><head>'
+        '<meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="color-scheme" content="dark">'
+        '<style>'
+        '@media only screen and (max-width:600px){'
+        '.em-pad{padding-left:8px!important;padding-right:8px!important;}'
+        '.em-trace{font-size:12px!important;letter-spacing:1px!important;}'
+        '.em-btn-a{display:block!important;text-align:center!important;}'
+        '}'
+        '</style></head>'
+        '<body style="margin:0;padding:0;background:#05080f;">'
+        f'{inner}'
+        '</body></html>'
+    )
+
+
 def _html_rows(rows, accent):
     """Vitals grid -- one label/value pair per row, hairline-separated."""
     out = []
@@ -102,14 +128,14 @@ def _compose_html(icon, headline, accent, rows, dashboard, state, monitor_name):
     button = ""
     if dashboard:
         button = (
-            '<tr><td style="padding:26px 24px 0 24px;">'
-            f'<a href="{_esc(dashboard)}" style="display:inline-block;background:{accent};color:#04170c;'
+            '<tr><td class="em-pad" style="padding:26px 24px 0 24px;">'
+            f'<a href="{_esc(dashboard)}" class="em-btn-a" style="display:inline-block;background:{accent};color:#04170c;'
             f'padding:13px 26px;border-radius:10px;text-decoration:none;font-size:13px;font-weight:700;'
             f'font-family:{_SANS};">Open Dashboard &rarr;</a></td></tr>'
         )
 
     return (
-        f'<div style="background:#060a12;padding:26px 12px;font-family:{_SANS};">'
+        f'<div class="em-pad" style="background:#060a12;padding:26px 12px;font-family:{_SANS};">'
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
         'style="max-width:560px;margin:0 auto;width:100%;background:#0c131f;'
         'border:1px solid #17243a;border-radius:18px;overflow:hidden;">'
@@ -125,7 +151,7 @@ def _compose_html(icon, headline, accent, rows, dashboard, state, monitor_name):
 
         # --- scope trace ---
         '<tr><td style="background:#050b12;padding:22px 20px;text-align:center;">'
-        f'<div style="font-family:{_MONO};font-size:20px;line-height:1.2;color:{accent};'
+        f'<div class="em-trace" style="font-family:{_MONO};font-size:16px;line-height:1.2;color:{accent};'
         f'letter-spacing:2px;white-space:nowrap;overflow:hidden;">{trace}</div>'
         f'<div style="font-family:{_MONO};font-size:10px;color:#6d8a80;letter-spacing:.18em;'
         f'padding-top:10px;">{note}</div>'
@@ -278,7 +304,7 @@ def _premium_card(state, monitor_name, hero, detail_rows, checks, note, dashboar
         button = '<tr><td style="padding:8px 28px 24px;"></td></tr>'
 
     return (
-        f'<div style="background:#05080f;padding:32px 12px;font-family:{_SANS};">'
+        f'<div class="em-pad" style="background:#05080f;padding:32px 12px;font-family:{_SANS};">'
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
         'style="max-width:600px;margin:0 auto;width:100%;">'
 
@@ -303,7 +329,7 @@ def _premium_card(state, monitor_name, hero, detail_rows, checks, note, dashboar
         f'<td align="left" style="font-family:{_MONO};font-size:10px;letter-spacing:2px;color:#3d5567;">SIGNAL</td>'
         f'<td align="right" style="font-family:{_MONO};font-size:10px;letter-spacing:2px;color:{accent};">{signal}</td>'
         '</tr></table>'
-        f'<div style="text-align:center;padding-top:12px;font-family:{_MONO};font-size:17px;'
+        f'<div class="em-trace" style="text-align:center;padding-top:12px;font-family:{_MONO};font-size:15px;'
         f'letter-spacing:2px;line-height:1.1;color:{accent};white-space:nowrap;overflow:hidden;">{trace}</div>'
         '</td></tr>'
 
@@ -601,7 +627,7 @@ def _send_email(subject, body, html_body=None):
         msg["To"] = to
         msg.set_content(body)
         if html_body:
-            msg.add_alternative(html_body, subtype="html")
+            msg.add_alternative(_wrap_email(html_body), subtype="html")
 
         # Port 465 is implicit TLS (SSL from the first byte); 587 is plain
         # then STARTTLS. Connecting the wrong way doesn't fail cleanly -- a
